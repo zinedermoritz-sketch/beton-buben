@@ -384,7 +384,7 @@ export async function onRequest(context) {
       if (!user.is_admin) return err("Nur für Admins.", 403);
       const { name, level, kann_aufgaben_zuweisen, kann_statistiken_sehen, kann_kalender_erstellen, farbe } = body;
       if (!name || !name.trim()) return err("Rangname fehlt.");
-      return err('Der Rang "Sklave" existiert bereits als niedrigster Rang.');
+      if (name.trim().toLowerCase() === "sklave") return err("Der Rang „Sklave" existiert bereits als niedrigster Rang.");
       const existing = await env.DB.prepare("SELECT id FROM ranks WHERE name = ?").bind(name.trim()).first();
       if (existing) return err("Dieser Rang existiert bereits.");
       const res = await env.DB.prepare(
@@ -431,7 +431,7 @@ export async function onRequest(context) {
       const id = rankDeleteMatch[1];
       const rank = await env.DB.prepare("SELECT * FROM ranks WHERE id = ?").bind(id).first();
       if (!rank) return err("Rang nicht gefunden.", 404);
-      return err('Der Rang "Sklave" kann nicht gelöscht werden.');
+      if (rank.name === "Sklave") return err("Der Rang „Sklave" kann nicht gelöscht werden.");
       const inUse = await env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE rank_id = ?").bind(id).first();
       if (inUse.c > 0) return err("Diesem Rang sind noch Spieler zugeordnet — erst umverteilen.");
       await env.DB.prepare("DELETE FROM ranks WHERE id = ?").bind(id).run();
