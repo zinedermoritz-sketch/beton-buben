@@ -71,9 +71,83 @@ function avatarHtml(avatar, size) {
 
 const EMOJI_CHOICES = ["🧱", "🏗️", "⛏️", "🪓", "🔨", "🦺", "👷", "🧊", "🪑", "💡", "🏟️", "🏆", "🐷", "🧟", "🦧", "🐸"];
 
+// ---------- Moderne Mehrfach-Auswahl ----------
+function ensureAssignmentStyles() {
+  if (document.getElementById("bb-assignment-styles")) return;
+  const s = document.createElement("style");
+  s.id = "bb-assignment-styles";
+  s.textContent = `
+    [hidden]{display:none!important}
+    .assignment-mode{display:flex;gap:8px;margin:10px 0 12px;flex-wrap:wrap}
+    .assignment-mode button{border:1px solid var(--border,#333);background:var(--panel,#17191d);color:var(--text,#fff);padding:8px 13px;border-radius:10px;cursor:pointer}
+    .assignment-mode button.active{border-color:var(--yellow,#f2c744);box-shadow:0 0 0 1px var(--yellow,#f2c744) inset;color:var(--yellow,#f2c744)}
+    .assignment-picker{position:relative;max-width:430px}
+    .assignment-picker.hidden{display:none}
+    .assignment-trigger{width:100%;min-height:42px;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 13px;border:1px solid var(--border,#333);border-radius:10px;background:var(--panel,#17191d);color:var(--text,#fff);cursor:pointer}
+    .assignment-trigger .count{color:var(--text-dim,#aaa);font-size:.9em}
+    .assignment-menu{position:absolute;z-index:1000;left:0;right:0;top:calc(100% + 6px);max-height:260px;overflow:auto;background:#15171b;border:1px solid #3a3d44;border-radius:12px;box-shadow:0 14px 35px rgba(0,0,0,.45);padding:6px}
+    .assignment-option{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;cursor:pointer}
+    .assignment-option:hover{background:rgba(255,255,255,.06)}
+    .assignment-option input{accent-color:var(--yellow,#f2c744);width:17px;height:17px}
+    .assignment-option span{display:flex;flex-direction:column}
+    .assignment-option small{color:var(--text-dim,#aaa)}
+    .assignment-summary{font-size:.9em;color:var(--text-dim,#aaa);margin-top:7px}
+    .stadium-progress-wrap{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;margin:10px 0 18px}
+    .stadium-progress-count{white-space:nowrap;font-weight:700}
+    .stadium-progress{height:14px;border-radius:999px;background:#30333a;overflow:hidden}
+    .stadium-progress-fill{height:100%;border-radius:999px;background:#48b96b;transition:width .35s ease}
+    .stadium-progress-percent{font-weight:700;min-width:48px;text-align:right}
+    @media(max-width:650px){.stadium-progress-wrap{grid-template-columns:1fr}.stadium-progress-percent{text-align:left}.assignment-picker{max-width:none}}
+  `;
+  document.head.appendChild(s);
+}
+
+function setupAssignmentPicker(root = document) {
+  root.querySelectorAll("[data-assignment-picker]").forEach((picker) => {
+    const trigger = picker.querySelector("[data-assignment-trigger]");
+    const menu = picker.querySelector("[data-assignment-menu]");
+    if (!trigger || !menu || picker.dataset.ready) return;
+    picker.dataset.ready = "1";
+    const update = () => {
+      const checked = [...menu.querySelectorAll("input[type=checkbox]:checked")];
+      const names = checked.map((x) => x.dataset.name);
+      trigger.querySelector(".label").textContent = names.length
+        ? names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "")
+        : "Spieler auswählen …";
+      trigger.querySelector(".count").textContent = names.length ? `${names.length} ausgewählt` : "";
+    };
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      menu.hidden = !menu.hidden;
+    };
+    menu.querySelectorAll("input[type=checkbox]").forEach((cb) => cb.onchange = update);
+    document.addEventListener("click", (e) => {
+      if (!picker.contains(e.target)) menu.hidden = true;
+    });
+    update();
+  });
+}
+
+function getSelectedAssignmentIds(form, name = "zustaendig_user_ids") {
+  return [...form.querySelectorAll(`input[name="${name}"]:checked`)].map((x) => Number(x.value)).filter(Boolean);
+}
+
+function setAssignmentMode(form, multiple) {
+  const single = form.querySelector("[data-single-assignment]");
+  const picker = form.querySelector("[data-multi-assignment]");
+  if (!single || !picker) return;
+  single.hidden = multiple;
+  picker.classList.toggle("hidden", !multiple);
+  form.querySelectorAll("[data-assignment-mode]").forEach((b) => b.classList.toggle("active", b.dataset.assignmentMode === (multiple ? "multiple" : "single")));
+  if (!multiple) picker.querySelectorAll("input[type=checkbox]").forEach((x) => x.checked = false);
+  if (multiple) single.value = "";
+  setupAssignmentPicker(form);
+}
+
 // ---------- Boot ----------
 
 async function boot() {
+  ensureAssignmentStyles();
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.view = btn.dataset.view;
@@ -87,6 +161,9 @@ async function boot() {
     render();
   });
   setupNotifUi();
+  const initialNotifPanel = document.getElementById("notifPanel");
+  if (initialNotifPanel) initialNotifPanel.hidden = true;
+  state.notifOpen = false;
 
   if (!state.token) {
     renderAuth("login");
@@ -177,7 +254,6 @@ async function pollNotifCount() {
 function startNotifPolling() {
   if (state.notifHandle) clearInterval(state.notifHandle);
   pollNotifCount();
-  checkBrowserNotifPermission();
   state.notifHandle = setInterval(async () => {
     try {
       const { notifications } = await api("/notifications");
@@ -342,6 +418,8 @@ async function renderDashboard() {
   const meineAufgaben = tasks.filter((t) => (t.zustaendig_user_id === me.id || (t.assignees || []).some((a) => a.id === me.id)) && t.status !== "ERLEDIGT").slice(0, 4);
   const top5 = leaderboard.slice(0, 5);
   const fertigeLayer = layers.filter((l) => l.status === "FERTIG").length;
+  const layerGesamt = layers.length;
+  const layerProzent = layerGesamt ? Math.round((fertigeLayer / layerGesamt) * 100) : 0;
 
   $app.innerHTML = `
     <h1>Willkommen, ${escapeHtml(me.vorname)}</h1>
@@ -453,9 +531,22 @@ async function renderAufgaben() {
           <option value="HOCH">Hoch</option>
         </select>
         ${canAssign ? `
-        <select name="zustaendig_user_ids" class="select-dark task-assignee-select" multiple size="3" title="Strg/Ctrl gedrückt halten, um mehrere Spieler auszuwählen">
-          ${spieler.users.map((u) => `<option value="${u.id}">${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)} (${escapeHtml(u.gamertag)})</option>`).join("")}
-        </select>` : ""}
+        <div class="assignment-box" style="flex:1;min-width:260px;">
+          <div class="assignment-mode">
+            <button type="button" class="active" data-assignment-mode="single">👤 Eine Person</button>
+            <button type="button" data-assignment-mode="multiple">👥 Mehrere Personen</button>
+          </div>
+          <select name="zustaendig_user_id" class="select-dark" data-single-assignment>
+            <option value="">— niemand zuweisen —</option>
+            ${spieler.users.map((u) => `<option value="${u.id}">${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)}</option>`).join("")}
+          </select>
+          <div class="assignment-picker hidden" data-multi-assignment data-assignment-picker>
+            <button type="button" class="assignment-trigger" data-assignment-trigger><span class="label">Spieler auswählen …</span><span class="count"></span>⌄</button>
+            <div class="assignment-menu" data-assignment-menu hidden>
+              ${spieler.users.map((u) => `<label class="assignment-option"><input type="checkbox" name="zustaendig_user_ids" value="${u.id}" data-name="${escapeHtml(u.vorname + " " + u.nachname)}"><span>${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)}<small>${escapeHtml(u.gamertag)}</small></span></label>`).join("")}
+            </div>
+          </div>
+        </div>` : ""}
         ${state.me.is_admin ? `<input type="number" name="punkte" min="0" placeholder="Punkte" class="num-input" style="width:90px;height:40px;" title="Wie viele Punkte gibt diese Aufgabe? (nur Admin)" />` : ""}
         <button class="btn small" type="submit">Aufgabe anlegen</button>
       </form>
@@ -475,13 +566,22 @@ async function renderAufgaben() {
         body: JSON.stringify({
           titel: f.get("titel"),
           prioritaet: f.get("prioritaet"),
-          zustaendig_user_ids: f.getAll("zustaendig_user_ids").map(Number).filter(Boolean),
+          zustaendig_user_ids: (() => {
+            const multi = getSelectedAssignmentIds(e.target);
+            const single = f.get("zustaendig_user_id");
+            return multi.length ? multi : (single ? [Number(single)] : []);
+          })(),
           punkte: f.get("punkte") ? Number(f.get("punkte")) : 0,
         }),
       });
       renderAufgaben();
     } catch (err) { alert(err.message); }
   };
+
+  document.querySelectorAll("[data-assignment-mode]").forEach((b) => b.onclick = () => {
+    setAssignmentMode(document.getElementById("taskForm"), b.dataset.assignmentMode === "multiple");
+  });
+  setupAssignmentPicker(document.getElementById("taskForm"));
 
   document.querySelectorAll("[data-start]").forEach((b) => b.onclick = async () => {
     try { await api(`/tasks/${b.dataset.start}/start`, { method: "POST" }); renderAufgaben(); }
@@ -546,13 +646,19 @@ async function renderStadion() {
     canAssign ? api("/users/active") : Promise.resolve({ users: [] }),
   ]);
   const fertig = layers.filter((l) => l.status === "FERTIG").length;
+  const layerProzent = layers.length ? Math.round((fertig / layers.length) * 100) : 0;
 
   $app.innerHTML = `
     <h1>🏟️ Stadion-Bau</h1>
     <div class="subtitle">Das Stadion entsteht Layer für Layer — jede fertige Blocklage färbt sich ein.</div>
 
     <div class="panel">
-      <h2>Baufortschritt (${fertig} / ${layers.length} Layer)</h2>
+      <h2>Baufortschritt</h2>
+      <div class="stadium-progress-wrap">
+        <div class="stadium-progress-count">${fertig} von ${layers.length} Layern fertig</div>
+        <div class="stadium-progress"><div class="stadium-progress-fill" style="width:${layerProzent}%"></div></div>
+        <div class="stadium-progress-percent">${layerProzent}%</div>
+      </div>
       ${stadiumVisualHtml(layers)}
     </div>
 
@@ -561,10 +667,22 @@ async function renderStadion() {
       <h2>Neue Layer anlegen</h2>
       <form id="layerForm" class="task-form">
         <input type="text" name="name" placeholder="z. B. Fundament, Rang 1, Dachkonstruktion …" required />
-        <select name="zustaendig_user_id" class="select-dark">
-          <option value="">— niemand zuweisen —</option>
-          ${spieler.users.map((u) => `<option value="${u.id}">${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)}</option>`).join("")}
-        </select>
+        <div class="assignment-box" style="flex:1;min-width:260px;">
+          <div class="assignment-mode">
+            <button type="button" class="active" data-assignment-mode="single">👤 Eine Person</button>
+            <button type="button" data-assignment-mode="multiple">👥 Mehrere Personen</button>
+          </div>
+          <select name="zustaendig_user_id" class="select-dark" data-single-assignment>
+            <option value="">— niemand zuweisen —</option>
+            ${spieler.users.map((u) => `<option value="${u.id}">${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)}</option>`).join("")}
+          </select>
+          <div class="assignment-picker hidden" data-multi-assignment data-assignment-picker>
+            <button type="button" class="assignment-trigger" data-assignment-trigger><span class="label">Spieler auswählen …</span><span class="count"></span>⌄</button>
+            <div class="assignment-menu" data-assignment-menu hidden>
+              ${spieler.users.map((u) => `<label class="assignment-option"><input type="checkbox" name="zustaendig_user_ids" value="${u.id}" data-name="${escapeHtml(u.vorname + " " + u.nachname)}"><span>${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)}<small>${escapeHtml(u.gamertag)}</small></span></label>`).join("")}
+            </div>
+          </div>
+        </div>
         ${state.me.is_admin ? `<input type="number" name="punkte" min="0" placeholder="Punkte" class="num-input" style="width:90px;height:40px;" />` : ""}
         <button class="btn small" type="submit">Layer anlegen</button>
       </form>
@@ -585,7 +703,11 @@ async function renderStadion() {
           method: "POST",
           body: JSON.stringify({
             name: f.get("name"),
-            zustaendig_user_id: f.get("zustaendig_user_id") ? Number(f.get("zustaendig_user_id")) : null,
+            zustaendig_user_ids: (() => {
+              const multi = getSelectedAssignmentIds(e.target);
+              const single = f.get("zustaendig_user_id");
+              return multi.length ? multi : (single ? [Number(single)] : []);
+            })(),
             punkte: f.get("punkte") ? Number(f.get("punkte")) : 0,
           }),
         });
@@ -593,6 +715,11 @@ async function renderStadion() {
       } catch (err) { alert(err.message); }
     };
   }
+
+  document.querySelectorAll("[data-assignment-mode]").forEach((b) => b.onclick = () => {
+    setAssignmentMode(document.getElementById("layerForm"), b.dataset.assignmentMode === "multiple");
+  });
+  setupAssignmentPicker(document.getElementById("layerForm"));
 
   document.querySelectorAll("[data-lstart]").forEach((b) => b.onclick = async () => { try { await api(`/stadion/layers/${b.dataset.lstart}/start`, { method: "POST" }); renderStadion(); } catch (e) { alert(e.message); } });
   document.querySelectorAll("[data-lpause]").forEach((b) => b.onclick = async () => { try { await api(`/stadion/layers/${b.dataset.lpause}/pause`, { method: "POST" }); renderStadion(); } catch (e) { alert(e.message); } });
@@ -611,8 +738,13 @@ function layerItemHtml(l, canAssign) {
   else if (l.status === "LAEUFT") actions = `<button class="btn small secondary" data-lpause="${l.id}">⏸ Pause</button> <button class="btn small secondary" data-lcomplete="${l.id}">Fertig ✓</button>`;
   else if (l.status === "PAUSIERT") actions = `<button class="btn small secondary" data-lresume="${l.id}">▶ Weiter</button> <button class="btn small secondary" data-lcomplete="${l.id}">Fertig ✓</button>`;
   if (canAssign) actions += ` <button class="btn small secondary" data-ldelete="${l.id}">🗑</button>`;
+  const assignees = l.assignees || [];
+  const names = assignees.length
+    ? assignees.map((a) => `${a.vorname} ${a.nachname}${assignees.length > 1 ? ` (${a.anteil || 100}%)` : ""}`).join(" / ")
+    : (l.zustaendig_name || "");
+  const splitHint = assignees.length > 1 && l.punkte ? `<div class="task-meta">🪙 Punkte werden gleichmäßig auf ${assignees.length} Spieler verteilt.</div>` : "";
   return `<li class="task-item ${cls}">
-    <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${l.zustaendig_name ? `<div class="task-meta">👷 ${escapeHtml(l.zustaendig_name)}</div>` : ""}</span>
+    <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
     <span class="status-pill ${l.status}">${STATUS_LABEL[l.status] || l.status}</span>
     ${actions}
   </li>`;
