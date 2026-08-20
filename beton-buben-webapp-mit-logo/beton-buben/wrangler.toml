@@ -7,7 +7,7 @@ compatibility_date = "2024-09-23"
 [[d1_databases]]
 binding = "DB"
 database_name = "beton-buben-db"
-database_id = "HIER-DEINE-DATABASE-ID-EINTRAGEN"
+database_id = "54481787-acf9-476b-8a91-5dc617a83714"
 
 # R2-Bucket-Bindung für den Dateien-Reiter (Uploads/Downloads).
 # Bucket-Namen frei wählbar, siehe README.md.
