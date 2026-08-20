@@ -491,6 +491,21 @@ async function renderDashboard() {
         ${EMOJI_CHOICES.map((e) => `<button class="avatar-opt ${me.avatar && me.avatar.wert === e ? 'selected' : ''}" data-avatar="${e}">${avatarHtml({ typ: "emoji", wert: e }, 40)}</button>`).join("")}
       </div>
     </div>
+
+    <div class="panel">
+      <h2>📐 Baupläne</h2>
+      <div class="subtitle" style="margin-bottom:12px;">Die aktuellen Baupläne zum Download.</div>
+      <ul class="task-list">
+        <li class="task-item">
+          <span class="titel">🏟️ Bauplan für Stadion<div class="task-meta">Litematica-Datei (.litematic)</div></span>
+          <a class="btn small secondary" href="/plaene/unnamed.litematic" download>⬇ Download</a>
+        </li>
+        <li class="task-item">
+          <span class="titel">📋 Plan für die ersten drei Tage<div class="task-meta">PDF-Zeitplan</div></span>
+          <a class="btn small secondary" href="/plaene/Buildattack_02_Plan.pdf" download>⬇ Download</a>
+        </li>
+      </ul>
+    </div>
   `;
 
   document.getElementById("powerSwitch").onclick = async () => {
