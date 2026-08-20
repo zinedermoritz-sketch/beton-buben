@@ -417,7 +417,8 @@ async function renderDashboard() {
   state.me = me;
   applyTabVisibility();
   document.getElementById("whoAvatar").innerHTML = avatarHtml(me.avatar, 26);
-  const [{ tasks }, { layers }, { profile: overviewUsers }] = await Promise.all([api("/tasks"), api("/stadion/layers"), api("/overview/stats")]);
+  const [{ tasks }, { layers }] = await Promise.all([api("/tasks"), api("/stadion/layers")]);
+  const overviewUsers = [];
   const meineAufgaben = tasks.filter((t) => (t.zustaendig_user_id === me.id || (t.assignees || []).some((a) => a.id === me.id)) && t.status !== "ERLEDIGT").slice(0, 4);
   const fertigeLayer = layers.filter((l) => l.status === "FERTIG").length;
   const layerGesamt = layers.length;
