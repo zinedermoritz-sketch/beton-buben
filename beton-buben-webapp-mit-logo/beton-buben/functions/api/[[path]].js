@@ -152,9 +152,13 @@ async function openSessionFor(env, gamertag) {
 
 async function completedTasksCountFor(env, userId) {
   const row = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM tasks WHERE zustaendig_user_id = ? AND status = 'ERLEDIGT'"
+    `SELECT COUNT(*) AS c
+     FROM tasks t
+     LEFT JOIN task_assignees ta ON ta.task_id = t.id
+     WHERE t.status = 'ERLEDIGT'
+       AND (t.zustaendig_user_id = ? OR ta.user_id = ?)`
   )
-    .bind(userId)
+    .bind(userId, userId)
     .first();
   return row.c || 0;
 }
@@ -193,21 +197,6 @@ async function notifyAllActive(env, typ, titel, text, link, exceptUserId) {
 
 function sanitizeDateiname(name) {
   return String(name || "datei").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 180) || "datei";
-}
-
-// ---------- Supabase Storage ----------
-
-async function supabaseStorageRequest(env, path, options = {}) {
-  const url = `${env.SUPABASE_URL}/storage/v1${path}`;
-
-  return fetch(url, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-      ...(options.headers || {})
-    }
-  });
 }
 
 // ---------- Router ----------
@@ -395,7 +384,7 @@ export async function onRequest(context) {
       if (!user.is_admin) return err("Nur für Admins.", 403);
       const { name, level, kann_aufgaben_zuweisen, kann_statistiken_sehen, kann_kalender_erstellen, farbe } = body;
       if (!name || !name.trim()) return err("Rangname fehlt.");
-      if (name.trim().toLowerCase() === "sklave") return err('Der Rang "Sklave" existiert bereits als niedrigster Rang.');
+      if (name.trim().toLowerCase() === "sklave") return err("Der Rang „Sklave" existiert bereits als niedrigster Rang.");
       const existing = await env.DB.prepare("SELECT id FROM ranks WHERE name = ?").bind(name.trim()).first();
       if (existing) return err("Dieser Rang existiert bereits.");
       const res = await env.DB.prepare(
@@ -442,7 +431,7 @@ export async function onRequest(context) {
       const id = rankDeleteMatch[1];
       const rank = await env.DB.prepare("SELECT * FROM ranks WHERE id = ?").bind(id).first();
       if (!rank) return err("Rang nicht gefunden.", 404);
-      return err('Der Rang "Sklave" kann nicht gelöscht werden.');
+      if (rank.name === "Sklave") return err("Der Rang „Sklave" kann nicht gelöscht werden.");
       const inUse = await env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE rank_id = ?").bind(id).first();
       if (inUse.c > 0) return err("Diesem Rang sind noch Spieler zugeordnet — erst umverteilen.");
       await env.DB.prepare("DELETE FROM ranks WHERE id = ?").bind(id).run();
@@ -453,26 +442,46 @@ export async function onRequest(context) {
 
     if (path === "/tasks" && method === "GET") {
       const { results } = await env.DB.prepare("SELECT * FROM tasks ORDER BY id DESC LIMIT 200").all();
+      for (const task of results) {
+        const { results: assignees } = await env.DB.prepare(
+          `SELECT u.id, u.vorname, u.nachname, u.gamertag, u.avatar, ta.anteil
+           FROM task_assignees ta
+           JOIN users u ON u.id = ta.user_id
+           WHERE ta.task_id = ? ORDER BY u.vorname`
+        ).bind(task.id).all();
+        task.assignees = assignees.map((a) => ({ ...a, avatar: avatarFor(a) }));
+        if (!task.assignees.length && task.zustaendig_user_id) {
+          const legacy = await env.DB.prepare(
+            "SELECT id, vorname, nachname, gamertag, avatar FROM users WHERE id = ?"
+          ).bind(task.zustaendig_user_id).first();
+          if (legacy) task.assignees = [{ ...legacy, avatar: avatarFor(legacy), anteil: 100 }];
+        }
+      }
       return json({ tasks: results });
     }
 
     if (path === "/tasks" && method === "POST") {
-      const { titel, notiz, prioritaet, zustaendig_user_id, punkte } = body;
+      const { titel, notiz, prioritaet, zustaendig_user_id, zustaendig_user_ids, punkte } = body;
       if (!titel || !titel.trim()) return err("Aufgabentitel fehlt.");
 
-      let zId = null;
-      let zName = null;
-      let zugewiesenVon = null;
-      if (zustaendig_user_id) {
-        if (!canAssign) return err("Keine Berechtigung, Aufgaben zuzuweisen.", 403);
-        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(zustaendig_user_id).first();
-        if (!target) return err("Spieler nicht gefunden.", 404);
-        zId = target.id;
-        zName = `${target.vorname} ${target.nachname}`;
-        zugewiesenVon = user.id;
+      let ids = Array.isArray(zustaendig_user_ids) ? zustaendig_user_ids.map(Number).filter(Boolean) : [];
+      if (!ids.length && zustaendig_user_id) ids = [Number(zustaendig_user_id)];
+      ids = [...new Set(ids)];
+
+      if (ids.length && !canAssign) return err("Keine Berechtigung, Aufgaben zuzuweisen.", 403);
+
+      const targets = [];
+      for (const id of ids) {
+        const target = await env.DB.prepare(
+          "SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1"
+        ).bind(id).first();
+        if (!target) return err("Mindestens ein ausgewählter Spieler wurde nicht gefunden.", 404);
+        targets.push(target);
       }
 
-      // Nur der Admin darf festlegen, wie viele Punkte eine Aufgabe bringt.
+      const zId = targets[0]?.id || null;
+      const zName = targets.length ? targets.map((t) => `${t.vorname} ${t.nachname}`).join(" / ") : null;
+      const zugewiesenVon = targets.length ? user.id : null;
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
 
       const res = await env.DB.prepare(
@@ -482,10 +491,25 @@ export async function onRequest(context) {
         .bind(titel.trim(), zId, zName, zugewiesenVon, prioritaet || "NORMAL", notiz || "", nowIso(), user.id, pkt)
         .run();
 
-      if (zId) {
-        await notify(env, zId, "AUFGABE_ZUGEWIESEN", "Neue Aufgabe zugewiesen", `${meName} hat dir „${titel.trim()}" zugewiesen.`, "aufgaben");
+      const taskId = res.meta.last_row_id;
+      if (targets.length) {
+        const share = Math.floor(100 / targets.length);
+        const remainder = 100 - share * targets.length;
+        for (let i = 0; i < targets.length; i++) {
+          await env.DB.prepare(
+            "INSERT INTO task_assignees (task_id, user_id, anteil) VALUES (?, ?, ?)"
+          ).bind(taskId, targets[i].id, share + (i === 0 ? remainder : 0)).run();
+        }
+        await notifyMany(
+          env,
+          targets.map((t) => t.id),
+          "AUFGABE_ZUGEWIESEN",
+          "Neue Aufgabe zugewiesen",
+          `${meName} hat dir „${titel.trim()}" zugewiesen.${targets.length > 1 ? ` Du teilst sie mit ${targets.length - 1} weiteren Spieler${targets.length - 1 === 1 ? '' : 'n'}.` : ''}`,
+          "aufgaben"
+        );
       }
-      return json({ id: res.meta.last_row_id });
+      return json({ id: taskId });
     }
 
     const taskStartMatch = path.match(/^\/tasks\/(\d+)\/start$/);
@@ -493,15 +517,12 @@ export async function onRequest(context) {
       const id = taskStartMatch[1];
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
-      if (task.status !== "OFFEN") return err("Aufgabe kann nicht gestartet werden.");
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) {
-        return err("Diese Aufgabe ist bereits jemand anderem zugewiesen.", 403);
-      }
+      if (task.status !== "OFFEN" && task.status !== "PAUSIERT") return err("Aufgabe kann nicht gestartet werden.");
+      const assignment = await env.DB.prepare("SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?").bind(id, user.id).first();
+      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !assignment && !canAssign) return err("Diese Aufgabe ist bereits jemand anderem zugewiesen.", 403);
       await env.DB.prepare(
-        "UPDATE tasks SET status = 'LAEUFT', start_zeit = ?, zustaendig_user_id = ?, zustaendig_name = ? WHERE id = ?"
-      )
-        .bind(nowIso(), task.zustaendig_user_id || user.id, task.zustaendig_name || meName, id)
-        .run();
+        "UPDATE tasks SET status = 'LAEUFT', start_zeit = COALESCE(start_zeit, ?), zustaendig_user_id = COALESCE(zustaendig_user_id, ?), zustaendig_name = COALESCE(zustaendig_name, ?) WHERE id = ?"
+      ).bind(nowIso(), user.id, meName, id).run();
       return json({ ok: true });
     }
 
@@ -511,7 +532,8 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "LAEUFT") return err("Nur laufende Aufgaben können pausiert werden.");
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      const assignment = await env.DB.prepare("SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?").bind(id, user.id).first();
+      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !assignment && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -522,7 +544,8 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "PAUSIERT") return err("Nur pausierte Aufgaben können fortgesetzt werden.");
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      const assignment = await env.DB.prepare("SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?").bind(id, user.id).first();
+      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !assignment && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE tasks SET status = 'LAEUFT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -532,18 +555,34 @@ export async function onRequest(context) {
       const id = taskCompleteMatch[1];
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ? WHERE id = ?")
-        .bind(nowIso(), id)
-        .run();
-      const empfaenger = task.zustaendig_user_id || user.id;
-      if (task.punkte > 0) await addPunkte(env, empfaenger, task.punkte);
+      if (task.status === "ERLEDIGT") return err("Diese Aufgabe ist bereits erledigt.");
+      const assignment = await env.DB.prepare("SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?").bind(id, user.id).first();
+      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !assignment && !canAssign) return err("Keine Berechtigung.", 403);
+
+      await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ? WHERE id = ?").bind(nowIso(), id).run();
+
+      const { results: assignees } = await env.DB.prepare("SELECT user_id, anteil FROM task_assignees WHERE task_id = ? ORDER BY user_id").bind(id).all();
+      if (assignees.length) {
+        let verteilt = 0;
+        for (let i = 0; i < assignees.length; i++) {
+          const a = assignees[i];
+          const anteil = Number(a.anteil || Math.floor(100 / assignees.length));
+          let punkte = Math.floor((task.punkte || 0) * anteil / 100);
+          if (i === assignees.length - 1) punkte = Math.max(0, (task.punkte || 0) - verteilt);
+          verteilt += punkte;
+          if (punkte) await addPunkte(env, a.user_id, punkte);
+        }
+      } else {
+        const empfaenger = task.zustaendig_user_id || user.id;
+        if (task.punkte > 0) await addPunkte(env, empfaenger, task.punkte);
+      }
+
       await notifyMany(
         env,
         [task.zugewiesen_von, task.erstellt_von].filter((x) => x && x !== user.id),
         "AUFGABE_ERLEDIGT",
         "Aufgabe erledigt",
-        `${meName} hat „${task.titel}" erledigt.${task.punkte ? ` (+${task.punkte} Punkte)` : ""}`,
+        `${meName} hat „${task.titel}" erledigt.${task.punkte ? ` (+${task.punkte} Punkte verteilt)` : ""}`,
         "aufgaben"
       );
       return json({ ok: true });
@@ -555,6 +594,7 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (!user.is_admin && task.erstellt_von !== user.id) return err("Keine Berechtigung.", 403);
+      await env.DB.prepare("DELETE FROM task_assignees WHERE task_id = ?").bind(id).run();
       await env.DB.prepare("DELETE FROM tasks WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -931,6 +971,7 @@ export async function onRequest(context) {
 
     if (path === "/dateien/upload" && method === "POST") {
       if (!user.is_admin) return err("Nur der Admin kann Dateien hochladen.", 403);
+      if (!env.FILES) return err("Datei-Speicher (R2) ist nicht eingerichtet. Siehe README.md.", 500);
       if (!contentType.includes("multipart/form-data")) return err("Ungültige Anfrage.");
       const form = await request.formData();
       const file = form.get("datei");
@@ -939,24 +980,9 @@ export async function onRequest(context) {
       const beschreibung = (form.get("beschreibung") || "").toString().slice(0, 500);
       const safeName = sanitizeDateiname(file.name);
       const r2Key = `${Date.now()}-${randHex(6)}-${safeName}`;
-      const uploadResponse = await supabaseStorageRequest(
-        env,
-        `/object/beton-buben-dateien/${encodeURIComponent(r2Key)}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": file.type || "application/octet-stream",
-            "x-upsert": "false"
-          },
-          body: file.stream()
-        }
-      );
-
-      if (!uploadResponse.ok) {
-        const errorText = await uploadResponse.text();
-        console.error("Supabase Upload Fehler:", errorText);
-        return err("Datei konnte nicht gespeichert werden.", 500);
-      }
+      await env.FILES.put(r2Key, file.stream(), {
+        httpMetadata: { contentType: file.type || "application/octet-stream" },
+      });
       const res = await env.DB.prepare(
         `INSERT INTO dateien (dateiname, beschreibung, groesse_bytes, content_type, r2_key, hochgeladen_von, hochgeladen_name, hochgeladen_am)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -976,15 +1002,12 @@ export async function onRequest(context) {
 
     const dateiDownloadMatch = path.match(/^\/dateien\/(\d+)\/download$/);
     if (dateiDownloadMatch && method === "GET") {
+      if (!env.FILES) return err("Datei-Speicher (R2) ist nicht eingerichtet.", 500);
       const datei = await env.DB.prepare("SELECT * FROM dateien WHERE id = ?").bind(dateiDownloadMatch[1]).first();
       if (!datei) return err("Datei nicht gefunden.", 404);
-      const fileResponse = await supabaseStorageRequest(
-        env,
-        `/object/beton-buben-dateien/${encodeURIComponent(datei.r2_key)}`,
-        { method: "GET" }
-      );
-      if (!fileResponse.ok) return err("Datei nicht mehr im Speicher vorhanden.", 404);
-      return new Response(fileResponse.body, {
+      const obj = await env.FILES.get(datei.r2_key);
+      if (!obj) return err("Datei nicht mehr im Speicher vorhanden.", 404);
+      return new Response(obj.body, {
         headers: {
           "content-type": datei.content_type || "application/octet-stream",
           "content-disposition": `attachment; filename="${datei.dateiname.replace(/"/g, "")}"`,
@@ -998,18 +1021,7 @@ export async function onRequest(context) {
       if (!user.is_admin) return err("Nur der Admin kann Dateien löschen.", 403);
       const datei = await env.DB.prepare("SELECT * FROM dateien WHERE id = ?").bind(dateiDeleteMatch[1]).first();
       if (!datei) return err("Datei nicht gefunden.", 404);
-      const deleteResponse = await supabaseStorageRequest(
-        env,
-        "/object/beton-buben-dateien",
-        {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prefixes: [datei.r2_key] })
-        }
-      );
-      if (!deleteResponse.ok) {
-        console.error("Supabase Delete Fehler:", await deleteResponse.text());
-      }
+      if (env.FILES) await env.FILES.delete(datei.r2_key);
       await env.DB.prepare("DELETE FROM dateien WHERE id = ?").bind(dateiDeleteMatch[1]).run();
       return json({ ok: true });
     }
