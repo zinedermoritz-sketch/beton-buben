@@ -195,6 +195,21 @@ function sanitizeDateiname(name) {
   return String(name || "datei").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 180) || "datei";
 }
 
+// ---------- Supabase Storage ----------
+
+async function supabaseStorageRequest(env, path, options = {}) {
+  const url = `${env.SUPABASE_URL}/storage/v1${path}`;
+
+  return fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      ...(options.headers || {})
+    }
+  });
+}
+
 // ---------- Router ----------
 
 export async function onRequest(context) {
@@ -916,7 +931,6 @@ export async function onRequest(context) {
 
     if (path === "/dateien/upload" && method === "POST") {
       if (!user.is_admin) return err("Nur der Admin kann Dateien hochladen.", 403);
-      if (!env.FILES) return err("Datei-Speicher (R2) ist nicht eingerichtet. Siehe README.md.", 500);
       if (!contentType.includes("multipart/form-data")) return err("Ungültige Anfrage.");
       const form = await request.formData();
       const file = form.get("datei");
@@ -925,9 +939,24 @@ export async function onRequest(context) {
       const beschreibung = (form.get("beschreibung") || "").toString().slice(0, 500);
       const safeName = sanitizeDateiname(file.name);
       const r2Key = `${Date.now()}-${randHex(6)}-${safeName}`;
-      await env.FILES.put(r2Key, file.stream(), {
-        httpMetadata: { contentType: file.type || "application/octet-stream" },
-      });
+      const uploadResponse = await supabaseStorageRequest(
+        env,
+        `/object/beton-buben-dateien/${encodeURIComponent(r2Key)}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": file.type || "application/octet-stream",
+            "x-upsert": "false"
+          },
+          body: file.stream()
+        }
+      );
+
+      if (!uploadResponse.ok) {
+        const errorText = await uploadResponse.text();
+        console.error("Supabase Upload Fehler:", errorText);
+        return err("Datei konnte nicht gespeichert werden.", 500);
+      }
       const res = await env.DB.prepare(
         `INSERT INTO dateien (dateiname, beschreibung, groesse_bytes, content_type, r2_key, hochgeladen_von, hochgeladen_name, hochgeladen_am)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -947,12 +976,15 @@ export async function onRequest(context) {
 
     const dateiDownloadMatch = path.match(/^\/dateien\/(\d+)\/download$/);
     if (dateiDownloadMatch && method === "GET") {
-      if (!env.FILES) return err("Datei-Speicher (R2) ist nicht eingerichtet.", 500);
       const datei = await env.DB.prepare("SELECT * FROM dateien WHERE id = ?").bind(dateiDownloadMatch[1]).first();
       if (!datei) return err("Datei nicht gefunden.", 404);
-      const obj = await env.FILES.get(datei.r2_key);
-      if (!obj) return err("Datei nicht mehr im Speicher vorhanden.", 404);
-      return new Response(obj.body, {
+      const fileResponse = await supabaseStorageRequest(
+        env,
+        `/object/beton-buben-dateien/${encodeURIComponent(datei.r2_key)}`,
+        { method: "GET" }
+      );
+      if (!fileResponse.ok) return err("Datei nicht mehr im Speicher vorhanden.", 404);
+      return new Response(fileResponse.body, {
         headers: {
           "content-type": datei.content_type || "application/octet-stream",
           "content-disposition": `attachment; filename="${datei.dateiname.replace(/"/g, "")}"`,
@@ -966,7 +998,18 @@ export async function onRequest(context) {
       if (!user.is_admin) return err("Nur der Admin kann Dateien löschen.", 403);
       const datei = await env.DB.prepare("SELECT * FROM dateien WHERE id = ?").bind(dateiDeleteMatch[1]).first();
       if (!datei) return err("Datei nicht gefunden.", 404);
-      if (env.FILES) await env.FILES.delete(datei.r2_key);
+      const deleteResponse = await supabaseStorageRequest(
+        env,
+        "/object/beton-buben-dateien",
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prefixes: [datei.r2_key] })
+        }
+      );
+      if (!deleteResponse.ok) {
+        console.error("Supabase Delete Fehler:", await deleteResponse.text());
+      }
       await env.DB.prepare("DELETE FROM dateien WHERE id = ?").bind(dateiDeleteMatch[1]).run();
       return json({ ok: true });
     }
