@@ -431,7 +431,7 @@ export async function onRequest(context) {
       const id = rankDeleteMatch[1];
       const rank = await env.DB.prepare("SELECT * FROM ranks WHERE id = ?").bind(id).first();
       if (!rank) return err("Rang nicht gefunden.", 404);
-      return err("Der Rang „Sklave" kann nicht gelöscht werden.");
+      return err('Der Rang "Sklave" kann nicht gelöscht werden.');
       const inUse = await env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE rank_id = ?").bind(id).first();
       if (inUse.c > 0) return err("Diesem Rang sind noch Spieler zugeordnet — erst umverteilen.");
       await env.DB.prepare("DELETE FROM ranks WHERE id = ?").bind(id).run();
