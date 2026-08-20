@@ -384,7 +384,7 @@ export async function onRequest(context) {
       if (!user.is_admin) return err("Nur für Admins.", 403);
       const { name, level, kann_aufgaben_zuweisen, kann_statistiken_sehen, kann_kalender_erstellen, farbe } = body;
       if (!name || !name.trim()) return err("Rangname fehlt.");
-      if (name.trim().toLowerCase() === "sklave") return err("Der Rang „Sklave" existiert bereits als niedrigster Rang.");
+      if (name.trim().toLowerCase() === "sklave") return err('Der Rang "Sklave" existiert bereits als niedrigster Rang.');
       const existing = await env.DB.prepare("SELECT id FROM ranks WHERE name = ?").bind(name.trim()).first();
       if (existing) return err("Dieser Rang existiert bereits.");
       const res = await env.DB.prepare(
