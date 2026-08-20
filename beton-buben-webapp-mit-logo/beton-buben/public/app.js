@@ -1,5 +1,3 @@
-// BETON-BUBEN · STADIONBAU — Frontend-Logik
-
 const API = "/api";
 let state = {
   token: localStorage.getItem("bb_token") || null,
@@ -235,7 +233,7 @@ async function loadNotifPanel() {
 }
 
 function notifIcon(typ) {
-  return { AUFGABE_ZUGEWIESEN: "📋", AUFGABE_ERLEDIGT: "✅", LAYER_ZUGEWIESEN: "🏟️", LAYER_FERTIG: "🧱", SHOP_KAUF: "🛒", SHOP_ERLEDIGT: "🎁", EVENT_NEU: "📅", DATEI_NEU: "📎" }[typ] || "🔔";
+  return { AUFGABE_ZUGEWIESEN: "📋", AUFGABE_ERLEDIGT: "✅", LAYER_ZUGEWIESEN: "🏟️", LAYER_FERTIG: "🧱", SHOP_KAUF: "🛒", SHOP_ERLEDIGT: "🎁", EVENT_NEU: "📅", DATEI_NEU: "📎", PUNKTE_GUTSCHRIFT: "🪙" }[typ] || "🔔";
 }
 
 function updateNotifBadge(count) {
@@ -1404,10 +1402,16 @@ async function renderAdmin() {
       <h2>Konten (${aktive.length})</h2>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Konto-ID</th><th>Name</th><th>Gamertag</th><th>Punkte</th><th>Rang</th><th>Letzter Login</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Konto-ID</th><th>Name</th><th>Gamertag</th><th>Punkte</th><th>Punkte buchen</th><th>Rang</th><th>Letzter Login</th><th>Status</th><th></th></tr></thead>
           <tbody>${aktive.map((k) => `<tr>
             <td>${k.konto_id}</td><td>${escapeHtml(k.vorname)} ${escapeHtml(k.nachname)}</td><td>${escapeHtml(k.gamertag)}</td>
             <td>🪙 ${k.punkte || 0}</td>
+            <td>
+              <div class="admin-points-control">
+                <input type="number" step="1" class="num-input" data-points-input="${k.id}" placeholder="±Punkte" />
+                <button class="btn small secondary" data-points-add="${k.id}">Buchen</button>
+              </div>
+            </td>
             <td>${k.is_admin ? `<span class="rank-chip" style="border-color:var(--yellow);color:var(--yellow)">Admin</span>` : `
               <select class="select-dark select-inline" data-rangwahl="${k.id}">
                 ${ranks.map((r) => `<option value="${r.id}" ${r.id === k.rank_id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("")}
@@ -1456,7 +1460,7 @@ async function renderAdmin() {
   document.querySelectorAll("[data-points-add]").forEach((b) => b.onclick = async () => {
     const input = document.querySelector(`[data-points-input="${b.dataset.pointsAdd}"]`);
     const punkte = Number(input?.value || 0);
-    if (!Number.isInteger(punkte) || punkte <= 0) return alert("Bitte eine positive ganze Zahl eingeben.");
+    if (!Number.isInteger(punkte) || punkte === 0) return alert("Bitte eine ganze Zahl ungleich 0 eingeben (negativ zum Abziehen).");
     try { await api(`/admin/konten/${b.dataset.pointsAdd}/punkte`, { method: "POST", body: JSON.stringify({ punkte }) }); renderAdmin(); }
     catch (e) { alert(e.message); }
   });
