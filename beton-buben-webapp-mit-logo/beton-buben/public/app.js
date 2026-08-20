@@ -292,6 +292,7 @@ function fireBrowserNotification(n) {
 function renderAuth(mode) {
   $topbar.hidden = true;
   if (state.tickHandle) clearInterval(state.tickHandle);
+  if (state.workTimerHandle) clearInterval(state.workTimerHandle);
   if (state.notifHandle) clearInterval(state.notifHandle);
 
   if (mode === "login") {
@@ -373,6 +374,7 @@ function renderAuth(mode) {
         }
         setToken(data.token);
         await boot();
+
       } catch (err) {
         document.getElementById("authErr").innerHTML = `<div class="error-msg">${escapeHtml(err.message)}</div>`;
       }
@@ -388,6 +390,7 @@ function render() {
   document.getElementById("whoAvatar").innerHTML = avatarHtml(state.me.avatar, 26);
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
   if (state.tickHandle) clearInterval(state.tickHandle);
+  if (state.workTimerHandle) clearInterval(state.workTimerHandle);
 
   const views = {
     dashboard: renderDashboard,
@@ -414,9 +417,8 @@ async function renderDashboard() {
   state.me = me;
   applyTabVisibility();
   document.getElementById("whoAvatar").innerHTML = avatarHtml(me.avatar, 26);
-  const [{ tasks }, { leaderboard }, { layers }] = await Promise.all([api("/tasks"), api("/leaderboard"), api("/stadion/layers")]);
+  const [{ tasks }, { layers }, { profile: overviewUsers }] = await Promise.all([api("/tasks"), api("/stadion/layers"), api("/overview/stats")]);
   const meineAufgaben = tasks.filter((t) => (t.zustaendig_user_id === me.id || (t.assignees || []).some((a) => a.id === me.id)) && t.status !== "ERLEDIGT").slice(0, 4);
-  const top5 = leaderboard.slice(0, 5);
   const fertigeLayer = layers.filter((l) => l.status === "FERTIG").length;
   const layerGesamt = layers.length;
   const layerProzent = layerGesamt ? Math.round((fertigeLayer / layerGesamt) * 100) : 0;
@@ -451,19 +453,21 @@ async function renderDashboard() {
         : `<div class="badge-row"><span class="badge-icon">🚧</span><div><div class="badge-name">Noch kein Abzeichen</div><div class="badge-next">Erstes Ziel: 🧱 Grundstein gelegt bei 1 Std.</div></div></div>`}
     </div>
 
-    <div class="panel">
-      <h2>🏟️ Stadion-Fortschritt</h2>
-      <div class="subtitle" style="margin-bottom:12px;">${fertigeLayer} von 100 Layern fertig.</div>
-      <div class="layer-progress" aria-label="Stadionfortschritt">
-        <div class="layer-progress-bar" style="width:${Math.min(100, fertigeLayer)}%"></div>
+    <div class="panel overview-progress-panel">
+      <h2>🏗️ Baufortschritt</h2>
+      <div class="stadium-progress-wrap">
+        <div class="stadium-progress-count">${fertigeLayer} von ${layerGesamt} Layern fertig</div>
+        <div class="stadium-progress"><div class="stadium-progress-fill" style="width:${layerProzent}%"></div></div>
+        <div class="stadium-progress-percent">${layerProzent}%</div>
       </div>
-      <div class="layer-progress-label">${Math.min(100, fertigeLayer)}% des Stadions fertig</div>
-      ${layers.length ? stadiumVisualHtml(layers) : `<div class="empty">Noch keine Layer angelegt.</div>`}
     </div>
 
     <div class="panel">
-      <h2>Zeit-Rangliste — Top 5</h2>
-      ${top5.length ? leaderboardTableHtml(top5) : `<div class="empty">Noch keine Bauzeit erfasst.</div>`}
+      <h2>👷 Spielerübersicht</h2>
+      <div class="table-wrap">
+        <table><thead><tr><th>Spieler</th><th>Spielzeit</th><th>Aufgaben abgeschlossen</th></tr></thead>
+        <tbody>${overviewUsers.map((u) => `<tr><td>${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)}</td><td>${fmtStd(u.gesamt_std)}</td><td>${u.aufgaben_erledigt}</td></tr>`).join("")}</tbody></table>
+      </div>
     </div>
 
     <div class="panel">
@@ -496,6 +500,8 @@ async function renderDashboard() {
     }, 1000);
   }
 }
+
+document.querySelectorAll("[data-dashboard-task]").forEach((el) => el.onclick = () => { state.view = "aufgaben"; render(); });
 
 const STATUS_LABEL = { OFFEN: "OFFEN", LAEUFT: "LÄUFT", PAUSIERT: "PAUSE", ERLEDIGT: "ERLEDIGT", FERTIG: "FERTIG" };
 
@@ -599,6 +605,8 @@ async function renderAufgaben() {
     try { await api(`/tasks/${b.dataset.complete}/complete`, { method: "POST" }); renderAufgaben(); }
     catch (e) { alert(e.message); }
   });
+  startWorkTimerTicker();
+
   document.querySelectorAll("[data-delete]").forEach((b) => b.onclick = async () => {
     if (!confirm("Aufgabe wirklich löschen?")) return;
     try { await api(`/tasks/${b.dataset.delete}`, { method: "DELETE" }); renderAufgaben(); }
@@ -725,6 +733,8 @@ async function renderStadion() {
   document.querySelectorAll("[data-lpause]").forEach((b) => b.onclick = async () => { try { await api(`/stadion/layers/${b.dataset.lpause}/pause`, { method: "POST" }); renderStadion(); } catch (e) { alert(e.message); } });
   document.querySelectorAll("[data-lresume]").forEach((b) => b.onclick = async () => { try { await api(`/stadion/layers/${b.dataset.lresume}/resume`, { method: "POST" }); renderStadion(); } catch (e) { alert(e.message); } });
   document.querySelectorAll("[data-lcomplete]").forEach((b) => b.onclick = async () => { try { await api(`/stadion/layers/${b.dataset.lcomplete}/complete`, { method: "POST" }); renderStadion(); } catch (e) { alert(e.message); } });
+  startWorkTimerTicker();
+
   document.querySelectorAll("[data-ldelete]").forEach((b) => b.onclick = async () => {
     if (!confirm("Layer wirklich löschen?")) return;
     try { await api(`/stadion/layers/${b.dataset.ldelete}`, { method: "DELETE" }); renderStadion(); } catch (e) { alert(e.message); }
@@ -1347,6 +1357,14 @@ async function renderAdmin() {
     await api(`/admin/konten/${b.dataset.toggle}/toggle`, { method: "POST" });
     renderAdmin();
   });
+  document.querySelectorAll("[data-points-add]").forEach((b) => b.onclick = async () => {
+    const input = document.querySelector(`[data-points-input="${b.dataset.pointsAdd}"]`);
+    const punkte = Number(input?.value || 0);
+    if (!Number.isInteger(punkte) || punkte <= 0) return alert("Bitte eine positive ganze Zahl eingeben.");
+    try { await api(`/admin/konten/${b.dataset.pointsAdd}/punkte`, { method: "POST", body: JSON.stringify({ punkte }) }); renderAdmin(); }
+    catch (e) { alert(e.message); }
+  });
+
   document.querySelectorAll("[data-approve]").forEach((b) => b.onclick = async () => {
     try { await api(`/admin/konten/${b.dataset.approve}/approve`, { method: "POST" }); renderAdmin(); }
     catch (e) { alert(e.message); }
@@ -1404,10 +1422,41 @@ async function renderAdmin() {
   };
 }
 
+function formatWorkTimer(item) {
+  if (!item.start_zeit) return "00:00:00";
+  const end = item.end_zeit ? new Date(item.end_zeit).getTime() : Date.now();
+  const start = new Date(item.start_zeit).getTime();
+  return fmtClock(Math.max(0, end - start));
+}
+
+function refreshWorkTimers() {
+  document.querySelectorAll("[data-timer-start]").forEach((el) => {
+    const start = new Date(el.dataset.timerStart).getTime();
+    const end = el.dataset.timerEnd ? new Date(el.dataset.timerEnd).getTime() : Date.now();
+    el.textContent = `⏱ ${fmtClock(Math.max(0, end - start))}`;
+  });
+}
+
+function startWorkTimerTicker() {
+  if (state.workTimerHandle) clearInterval(state.workTimerHandle);
+  if (!document.querySelector("[data-timer-start]")) return;
+  refreshWorkTimers();
+  state.workTimerHandle = setInterval(refreshWorkTimers, 1000);
+}
+
 // ---------- Utils ----------
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+const extraUiStyle = document.createElement("style");
+extraUiStyle.textContent = `
+.dashboard-task-link { cursor:pointer; transition:transform .15s ease, border-color .15s ease; }
+.dashboard-task-link:hover { transform:translateY(-1px); border-color:var(--yellow); }
+.work-timer { margin-left:auto; padding:6px 10px; border-radius:10px; background:rgba(242,199,68,.12); color:var(--yellow); font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.admin-points-control { display:flex; gap:6px; margin-top:6px; }
+.admin-points-control .num-input { width:90px; height:32px; }
+`;
+document.head.appendChild(extraUiStyle);
 
 boot();
