@@ -1,3 +1,6 @@
+
+
+
 // BETON-BUBEN · STADIONBAU — Backend-API
 // Läuft als Cloudflare Pages Function unter /api/*
 // Benötigt: D1-Binding "DB" + Secret "JWT_SECRET" (siehe README.md)
@@ -152,13 +155,9 @@ async function openSessionFor(env, gamertag) {
 
 async function completedTasksCountFor(env, userId) {
   const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS c
-     FROM tasks t
-     LEFT JOIN task_assignees ta ON ta.task_id = t.id
-     WHERE t.status = 'ERLEDIGT'
-       AND (t.zustaendig_user_id = ? OR ta.user_id = ?)`
+    "SELECT COUNT(*) AS c FROM tasks WHERE zustaendig_user_id = ? AND status = 'ERLEDIGT'"
   )
-    .bind(userId, userId)
+    .bind(userId)
     .first();
   return row.c || 0;
 }
@@ -334,34 +333,107 @@ export async function onRequest(context) {
     // ---- ONLINE-ZEIT ----
 
     if (path === "/session/toggle" && method === "POST") {
-      const open = await openSessionFor(env, user.gamertag);
+      // Immer nur die zuletzt gestartete offene Session verwenden.
+      const open = await env.DB.prepare(
+        "SELECT * FROM sessions WHERE user_id = ? AND status = 'ON' ORDER BY id DESC LIMIT 1"
+      ).bind(user.id).first();
+
+      // OFF: laufende Session exakt beenden.
       if (open) {
-        const start = new Date(open.start);
+        const startMs = new Date(open.start).getTime();
         const ende = new Date();
-        const dauer = (ende - start) / 1000 / 3600;
+        const endeMs = ende.getTime();
+
+        let dauer = 0;
+        if (Number.isFinite(startMs) && startMs <= endeMs) {
+          dauer = (endeMs - startMs) / 1000 / 3600;
+        }
+
         await env.DB.prepare(
-          "UPDATE sessions SET ende = ?, dauer_std = ?, status = 'OFF' WHERE id = ?"
-        )
-          .bind(ende.toISOString(), dauer, open.id)
-          .run();
-        return json({ online: false, dauer_std: dauer });
-      } else {
-        const code = "S-" + randHex(4).toUpperCase();
-        await env.DB.prepare(
-          `INSERT INTO sessions (user_id, gamertag, datum, start, status, quelle, session_code)
-           VALUES (?, ?, ?, ?, 'ON', 'WEB', ?)`
-        )
-          .bind(user.id, user.gamertag, todayStr(), nowIso(), code)
-          .run();
-        return json({ online: true, seit: nowIso() });
+          `UPDATE sessions
+           SET ende = ?, dauer_std = ?, status = 'OFF'
+           WHERE id = ? AND user_id = ? AND status = 'ON'`
+        ).bind(
+          ende.toISOString(),
+          dauer,
+          open.id,
+          user.id
+        ).run();
+
+        // Alte/doppelte offene Sessions ebenfalls schließen,
+        // damit niemals mehrere Timer gleichzeitig laufen.
+        const stale = await env.DB.prepare(
+          "SELECT id, start FROM sessions WHERE user_id = ? AND status = 'ON' ORDER BY id ASC"
+        ).bind(user.id).all();
+
+        for (const s of stale.results || []) {
+          const staleStart = new Date(s.start).getTime();
+          let staleDauer = 0;
+          if (Number.isFinite(staleStart) && staleStart <= endeMs) {
+            staleDauer = (endeMs - staleStart) / 1000 / 3600;
+          }
+
+          await env.DB.prepare(
+            `UPDATE sessions
+             SET ende = ?, dauer_std = ?, status = 'OFF'
+             WHERE id = ? AND user_id = ? AND status = 'ON'`
+          ).bind(
+            ende.toISOString(),
+            staleDauer,
+            s.id,
+            user.id
+          ).run();
+        }
+
+        const gesamt = await totalHoursFor(env, user.gamertag);
+        const heute = await todayHoursFor(env, user.gamertag);
+
+        return json({
+          online: false,
+          seit: null,
+          dauer_std: dauer,
+          gesamt_std: gesamt,
+          heute_std: heute
+        });
       }
+
+      // ON: genau eine neue Session starten.
+      const startIso = nowIso();
+      const code = "S-" + randHex(4).toUpperCase();
+
+      await env.DB.prepare(
+        `INSERT INTO sessions
+          (user_id, gamertag, datum, start, status, quelle, session_code)
+         VALUES (?, ?, ?, ?, 'ON', 'WEB', ?)`
+      ).bind(
+        user.id,
+        user.gamertag,
+        todayStr(),
+        startIso,
+        code
+      ).run();
+
+      return json({
+        online: true,
+        seit: startIso,
+        dauer_std: 0
+      });
     }
 
     if (path === "/session/status" && method === "GET") {
-      const open = await openSessionFor(env, user.gamertag);
+      const open = await env.DB.prepare(
+        "SELECT * FROM sessions WHERE user_id = ? AND status = 'ON' ORDER BY id DESC LIMIT 1"
+      ).bind(user.id).first();
+
       const gesamt = await totalHoursFor(env, user.gamertag);
       const heute = await todayHoursFor(env, user.gamertag);
-      return json({ online: !!open, seit: open ? open.start : null, gesamt_std: gesamt, heute_std: heute });
+
+      return json({
+        online: !!open,
+        seit: open ? open.start : null,
+        gesamt_std: gesamt,
+        heute_std: heute
+      });
     }
 
     // ---- SPIELER-LISTE (für Zuweisungs-Auswahl) ----
@@ -384,7 +456,7 @@ export async function onRequest(context) {
       if (!user.is_admin) return err("Nur für Admins.", 403);
       const { name, level, kann_aufgaben_zuweisen, kann_statistiken_sehen, kann_kalender_erstellen, farbe } = body;
       if (!name || !name.trim()) return err("Rangname fehlt.");
-      return err('Der Rang "Sklave" existiert bereits als niedrigster Rang.');
+      if (name.trim().toLowerCase() === "sklave") return err('Der Rang "Sklave" existiert bereits als niedrigster Rang.');
       const existing = await env.DB.prepare("SELECT id FROM ranks WHERE name = ?").bind(name.trim()).first();
       if (existing) return err("Dieser Rang existiert bereits.");
       const res = await env.DB.prepare(
@@ -431,7 +503,7 @@ export async function onRequest(context) {
       const id = rankDeleteMatch[1];
       const rank = await env.DB.prepare("SELECT * FROM ranks WHERE id = ?").bind(id).first();
       if (!rank) return err("Rang nicht gefunden.", 404);
-      if (rank.name === "Sklave") return err('Der Rang "Sklave" kann nicht gelöscht werden.');
+      return err('Der Rang "Sklave" kann nicht gelöscht werden.');
       const inUse = await env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE rank_id = ?").bind(id).first();
       if (inUse.c > 0) return err("Diesem Rang sind noch Spieler zugeordnet — erst umverteilen.");
       await env.DB.prepare("DELETE FROM ranks WHERE id = ?").bind(id).run();
@@ -442,46 +514,26 @@ export async function onRequest(context) {
 
     if (path === "/tasks" && method === "GET") {
       const { results } = await env.DB.prepare("SELECT * FROM tasks ORDER BY id DESC LIMIT 200").all();
-      for (const task of results) {
-        const { results: assignees } = await env.DB.prepare(
-          `SELECT u.id, u.vorname, u.nachname, u.gamertag, u.avatar, ta.anteil
-           FROM task_assignees ta
-           JOIN users u ON u.id = ta.user_id
-           WHERE ta.task_id = ? ORDER BY u.vorname`
-        ).bind(task.id).all();
-        task.assignees = assignees.map((a) => ({ ...a, avatar: avatarFor(a) }));
-        if (!task.assignees.length && task.zustaendig_user_id) {
-          const legacy = await env.DB.prepare(
-            "SELECT id, vorname, nachname, gamertag, avatar FROM users WHERE id = ?"
-          ).bind(task.zustaendig_user_id).first();
-          if (legacy) task.assignees = [{ ...legacy, avatar: avatarFor(legacy), anteil: 100 }];
-        }
-      }
       return json({ tasks: results });
     }
 
     if (path === "/tasks" && method === "POST") {
-      const { titel, notiz, prioritaet, zustaendig_user_id, zustaendig_user_ids, punkte } = body;
+      const { titel, notiz, prioritaet, zustaendig_user_id, punkte } = body;
       if (!titel || !titel.trim()) return err("Aufgabentitel fehlt.");
 
-      let ids = Array.isArray(zustaendig_user_ids) ? zustaendig_user_ids.map(Number).filter(Boolean) : [];
-      if (!ids.length && zustaendig_user_id) ids = [Number(zustaendig_user_id)];
-      ids = [...new Set(ids)];
-
-      if (ids.length && !canAssign) return err("Keine Berechtigung, Aufgaben zuzuweisen.", 403);
-
-      const targets = [];
-      for (const id of ids) {
-        const target = await env.DB.prepare(
-          "SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1"
-        ).bind(id).first();
-        if (!target) return err("Mindestens ein ausgewählter Spieler wurde nicht gefunden.", 404);
-        targets.push(target);
+      let zId = null;
+      let zName = null;
+      let zugewiesenVon = null;
+      if (zustaendig_user_id) {
+        if (!canAssign) return err("Keine Berechtigung, Aufgaben zuzuweisen.", 403);
+        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(zustaendig_user_id).first();
+        if (!target) return err("Spieler nicht gefunden.", 404);
+        zId = target.id;
+        zName = `${target.vorname} ${target.nachname}`;
+        zugewiesenVon = user.id;
       }
 
-      const zId = targets[0]?.id || null;
-      const zName = targets.length ? targets.map((t) => `${t.vorname} ${t.nachname}`).join(" / ") : null;
-      const zugewiesenVon = targets.length ? user.id : null;
+      // Nur der Admin darf festlegen, wie viele Punkte eine Aufgabe bringt.
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
 
       const res = await env.DB.prepare(
@@ -491,25 +543,10 @@ export async function onRequest(context) {
         .bind(titel.trim(), zId, zName, zugewiesenVon, prioritaet || "NORMAL", notiz || "", nowIso(), user.id, pkt)
         .run();
 
-      const taskId = res.meta.last_row_id;
-      if (targets.length) {
-        const share = Math.floor(100 / targets.length);
-        const remainder = 100 - share * targets.length;
-        for (let i = 0; i < targets.length; i++) {
-          await env.DB.prepare(
-            "INSERT INTO task_assignees (task_id, user_id, anteil) VALUES (?, ?, ?)"
-          ).bind(taskId, targets[i].id, share + (i === 0 ? remainder : 0)).run();
-        }
-        await notifyMany(
-          env,
-          targets.map((t) => t.id),
-          "AUFGABE_ZUGEWIESEN",
-          "Neue Aufgabe zugewiesen",
-          `${meName} hat dir „${titel.trim()}" zugewiesen.${targets.length > 1 ? ` Du teilst sie mit ${targets.length - 1} weiteren Spieler${targets.length - 1 === 1 ? '' : 'n'}.` : ''}`,
-          "aufgaben"
-        );
+      if (zId) {
+        await notify(env, zId, "AUFGABE_ZUGEWIESEN", "Neue Aufgabe zugewiesen", `${meName} hat dir „${titel.trim()}" zugewiesen.`, "aufgaben");
       }
-      return json({ id: taskId });
+      return json({ id: res.meta.last_row_id });
     }
 
     const taskStartMatch = path.match(/^\/tasks\/(\d+)\/start$/);
@@ -517,12 +554,15 @@ export async function onRequest(context) {
       const id = taskStartMatch[1];
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
-      if (task.status !== "OFFEN" && task.status !== "PAUSIERT") return err("Aufgabe kann nicht gestartet werden.");
-      const assignment = await env.DB.prepare("SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?").bind(id, user.id).first();
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !assignment && !canAssign) return err("Diese Aufgabe ist bereits jemand anderem zugewiesen.", 403);
+      if (task.status !== "OFFEN") return err("Aufgabe kann nicht gestartet werden.");
+      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) {
+        return err("Diese Aufgabe ist bereits jemand anderem zugewiesen.", 403);
+      }
       await env.DB.prepare(
-        "UPDATE tasks SET status = 'LAEUFT', start_zeit = COALESCE(start_zeit, ?), zustaendig_user_id = COALESCE(zustaendig_user_id, ?), zustaendig_name = COALESCE(zustaendig_name, ?) WHERE id = ?"
-      ).bind(nowIso(), user.id, meName, id).run();
+        "UPDATE tasks SET status = 'LAEUFT', start_zeit = ?, zustaendig_user_id = ?, zustaendig_name = ? WHERE id = ?"
+      )
+        .bind(nowIso(), task.zustaendig_user_id || user.id, task.zustaendig_name || meName, id)
+        .run();
       return json({ ok: true });
     }
 
@@ -532,8 +572,7 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "LAEUFT") return err("Nur laufende Aufgaben können pausiert werden.");
-      const assignment = await env.DB.prepare("SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?").bind(id, user.id).first();
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !assignment && !canAssign) return err("Keine Berechtigung.", 403);
+      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -544,8 +583,7 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "PAUSIERT") return err("Nur pausierte Aufgaben können fortgesetzt werden.");
-      const assignment = await env.DB.prepare("SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?").bind(id, user.id).first();
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !assignment && !canAssign) return err("Keine Berechtigung.", 403);
+      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE tasks SET status = 'LAEUFT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -555,34 +593,18 @@ export async function onRequest(context) {
       const id = taskCompleteMatch[1];
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
-      if (task.status === "ERLEDIGT") return err("Diese Aufgabe ist bereits erledigt.");
-      const assignment = await env.DB.prepare("SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?").bind(id, user.id).first();
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !assignment && !canAssign) return err("Keine Berechtigung.", 403);
-
-      await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ? WHERE id = ?").bind(nowIso(), id).run();
-
-      const { results: assignees } = await env.DB.prepare("SELECT user_id, anteil FROM task_assignees WHERE task_id = ? ORDER BY user_id").bind(id).all();
-      if (assignees.length) {
-        let verteilt = 0;
-        for (let i = 0; i < assignees.length; i++) {
-          const a = assignees[i];
-          const anteil = Number(a.anteil || Math.floor(100 / assignees.length));
-          let punkte = Math.floor((task.punkte || 0) * anteil / 100);
-          if (i === assignees.length - 1) punkte = Math.max(0, (task.punkte || 0) - verteilt);
-          verteilt += punkte;
-          if (punkte) await addPunkte(env, a.user_id, punkte);
-        }
-      } else {
-        const empfaenger = task.zustaendig_user_id || user.id;
-        if (task.punkte > 0) await addPunkte(env, empfaenger, task.punkte);
-      }
-
+      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ? WHERE id = ?")
+        .bind(nowIso(), id)
+        .run();
+      const empfaenger = task.zustaendig_user_id || user.id;
+      if (task.punkte > 0) await addPunkte(env, empfaenger, task.punkte);
       await notifyMany(
         env,
         [task.zugewiesen_von, task.erstellt_von].filter((x) => x && x !== user.id),
         "AUFGABE_ERLEDIGT",
         "Aufgabe erledigt",
-        `${meName} hat „${task.titel}" erledigt.${task.punkte ? ` (+${task.punkte} Punkte verteilt)` : ""}`,
+        `${meName} hat „${task.titel}" erledigt.${task.punkte ? ` (+${task.punkte} Punkte)` : ""}`,
         "aufgaben"
       );
       return json({ ok: true });
@@ -594,7 +616,6 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (!user.is_admin && task.erstellt_von !== user.id) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("DELETE FROM task_assignees WHERE task_id = ?").bind(id).run();
       await env.DB.prepare("DELETE FROM tasks WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -688,53 +709,33 @@ export async function onRequest(context) {
 
     if (path === "/stadion/layers" && method === "GET") {
       const { results } = await env.DB.prepare("SELECT * FROM stadium_layers ORDER BY layer_nr ASC").all();
-      for (const layer of results) {
-        try {
-          const { results: assignees } = await env.DB.prepare(
-            `SELECT u.id, u.vorname, u.nachname, u.gamertag, u.avatar, la.anteil
-             FROM layer_assignees la JOIN users u ON u.id = la.user_id
-             WHERE la.layer_id = ? ORDER BY u.vorname`
-          ).bind(layer.id).all();
-          layer.assignees = assignees.map((a) => ({ ...a, avatar: avatarFor(a) }));
-        } catch (_) { layer.assignees = []; }
-      }
       return json({ layers: results });
     }
 
     if (path === "/stadion/layers" && method === "POST") {
-      if (!canAssign) return err("Keine Berechtigung, Layer zuzuweisen.", 403);
-      const { name, zustaendig_user_id, zustaendig_user_ids, punkte } = body;
+      if (!canAssign) return err("Keine Berechtigung, Stadion-Layer anzulegen.", 403);
+      const { name, punkte, zustaendig_user_id } = body;
       if (!name || !name.trim()) return err("Name der Layer fehlt.");
       const maxRow = await env.DB.prepare("SELECT COALESCE(MAX(layer_nr),0) AS m FROM stadium_layers").first();
       const nr = (maxRow.m || 0) + 1;
-      let ids = Array.isArray(zustaendig_user_ids) ? zustaendig_user_ids.map(Number).filter(Boolean) : [];
-      if (!ids.length && zustaendig_user_id) ids = [Number(zustaendig_user_id)];
-      ids = [...new Set(ids)];
-      const targets = [];
-      for (const id of ids) {
-        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(id).first();
-        if (!target) return err("Mindestens ein ausgewählter Spieler wurde nicht gefunden.", 404);
-        targets.push(target);
+
+      let zId = null, zName = null, zugewiesenVon = null;
+      if (zustaendig_user_id) {
+        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(zustaendig_user_id).first();
+        if (!target) return err("Spieler nicht gefunden.", 404);
+        zId = target.id; zName = `${target.vorname} ${target.nachname}`; zugewiesenVon = user.id;
       }
-      const zId = targets[0]?.id || null;
-      const zName = targets.length ? targets.map((t) => `${t.vorname} ${t.nachname}`).join(" / ") : null;
-      const zugewiesenVon = targets.length ? user.id : null;
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
+
       const res = await env.DB.prepare(
         `INSERT INTO stadium_layers (layer_nr, name, status, zustaendig_user_id, zustaendig_name, zugewiesen_von, punkte, erstellt_am, erstellt_von)
          VALUES (?, ?, 'OFFEN', ?, ?, ?, ?, ?, ?)`
-      ).bind(nr, name.trim(), zId, zName, zugewiesenVon, pkt, nowIso(), user.id).run();
-      const layerId = res.meta.last_row_id;
-      if (targets.length) {
-        const share = Math.floor(100 / targets.length);
-        const remainder = 100 - share * targets.length;
-        for (let i = 0; i < targets.length; i++) {
-          await env.DB.prepare("INSERT INTO layer_assignees (layer_id, user_id, anteil) VALUES (?, ?, ?)")
-            .bind(layerId, targets[i].id, share + (i === 0 ? remainder : 0)).run();
-        }
-        await notifyMany(env, targets.map((t) => t.id), "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${name.trim()}" zugewiesen.`, "stadion");
-      }
-      return json({ id: layerId, layer_nr: nr });
+      )
+        .bind(nr, name.trim(), zId, zName, zugewiesenVon, pkt, nowIso(), user.id)
+        .run();
+
+      if (zId) await notify(env, zId, "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${name.trim()}" zugewiesen.`, "stadion");
+      return json({ id: res.meta.last_row_id, layer_nr: nr });
     }
 
     const layerAssignMatch = path.match(/^\/stadion\/layers\/(\d+)\/zuweisen$/);
@@ -813,8 +814,7 @@ export async function onRequest(context) {
     const layerDeleteMatch = path.match(/^\/stadion\/layers\/(\d+)$/);
     if (layerDeleteMatch && method === "DELETE") {
       if (!user.is_admin && !canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("DELETE FROM layer_assignees WHERE layer_id = ?").bind(layerDeleteMatch[1]).run();
-       await env.DB.prepare("DELETE FROM stadium_layers WHERE id = ?").bind(layerDeleteMatch[1]).run();
+      await env.DB.prepare("DELETE FROM stadium_layers WHERE id = ?").bind(layerDeleteMatch[1]).run();
       return json({ ok: true });
     }
 
@@ -1179,23 +1179,6 @@ export async function onRequest(context) {
       return json({ profile: out });
     }
 
-
-    if (path === "/overview/stats" && method === "GET") {
-      const { results: users2 } = await env.DB.prepare(
-        `SELECT id, vorname, nachname, gamertag, aktiv FROM users WHERE freigegeben = 1 ORDER BY vorname, nachname`
-      ).all();
-      const profile = [];
-      for (const u of users2) {
-        profile.push({
-          vorname: u.vorname,
-          nachname: u.nachname,
-          gesamt_std: await totalHoursFor(env, u.gamertag),
-          aufgaben_erledigt: await completedTasksCountFor(env, u.id),
-        });
-      }
-      return json({ profile });
-    }
-
     // ---- ADMIN ----
 
     if (path === "/admin/konten" && method === "GET") {
@@ -1206,19 +1189,6 @@ export async function onRequest(context) {
          FROM users u LEFT JOIN ranks r ON r.id = u.rank_id ORDER BY u.freigegeben ASC, u.id`
       ).all();
       return json({ konten: results });
-    }
-
-
-    const pointsMatch = path.match(/^\/admin\/konten\/(\d+)\/punkte$/);
-    if (pointsMatch && method === "POST") {
-      if (!user.is_admin) return err("Nur für Admins.", 403);
-      const id = Number(pointsMatch[1]);
-      const punkte = Number(body.punkte);
-      if (!Number.isInteger(punkte) || punkte <= 0) return err("Punkte müssen eine positive ganze Zahl sein.");
-      const target = await env.DB.prepare("SELECT id FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(id).first();
-      if (!target) return err("Spieler nicht gefunden.", 404);
-      await addPunkte(env, id, punkte);
-      return json({ ok: true, punkte });
     }
 
     const toggleMatch = path.match(/^\/admin\/konten\/(\d+)\/toggle$/);
