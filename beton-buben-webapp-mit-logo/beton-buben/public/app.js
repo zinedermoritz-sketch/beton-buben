@@ -339,7 +339,7 @@ async function renderDashboard() {
   applyTabVisibility();
   document.getElementById("whoAvatar").innerHTML = avatarHtml(me.avatar, 26);
   const [{ tasks }, { leaderboard }, { layers }] = await Promise.all([api("/tasks"), api("/leaderboard"), api("/stadion/layers")]);
-  const meineAufgaben = tasks.filter((t) => t.zustaendig_user_id === me.id && t.status !== "ERLEDIGT").slice(0, 4);
+  const meineAufgaben = tasks.filter((t) => (t.zustaendig_user_id === me.id || (t.assignees || []).some((a) => a.id === me.id)) && t.status !== "ERLEDIGT").slice(0, 4);
   const top5 = leaderboard.slice(0, 5);
   const fertigeLayer = layers.filter((l) => l.status === "FERTIG").length;
 
@@ -373,12 +373,15 @@ async function renderDashboard() {
         : `<div class="badge-row"><span class="badge-icon">🚧</span><div><div class="badge-name">Noch kein Abzeichen</div><div class="badge-next">Erstes Ziel: 🧱 Grundstein gelegt bei 1 Std.</div></div></div>`}
     </div>
 
-    ${layers.length ? `
     <div class="panel">
       <h2>🏟️ Stadion-Fortschritt</h2>
-      <div class="subtitle" style="margin-bottom:12px;">${fertigeLayer} von ${layers.length} Block-Layern fertig.</div>
-      ${stadiumVisualHtml(layers)}
-    </div>` : ""}
+      <div class="subtitle" style="margin-bottom:12px;">${fertigeLayer} von 100 Layern fertig.</div>
+      <div class="layer-progress" aria-label="Stadionfortschritt">
+        <div class="layer-progress-bar" style="width:${Math.min(100, fertigeLayer)}%"></div>
+      </div>
+      <div class="layer-progress-label">${Math.min(100, fertigeLayer)}% des Stadions fertig</div>
+      ${layers.length ? stadiumVisualHtml(layers) : `<div class="empty">Noch keine Layer angelegt.</div>`}
+    </div>
 
     <div class="panel">
       <h2>Zeit-Rangliste — Top 5</h2>
@@ -420,8 +423,9 @@ const STATUS_LABEL = { OFFEN: "OFFEN", LAEUFT: "LÄUFT", PAUSIERT: "PAUSE", ERLE
 
 function taskItemHtml(t) {
   const cls = t.status === "ERLEDIGT" ? "done" : "";
+  const names = (t.assignees || []).map((a) => a.vorname + " " + a.nachname).join(" / ") || t.zustaendig_name || "";
   return `<li class="task-item ${cls}">
-    <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}</span>
+    <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
   </li>`;
 }
@@ -449,8 +453,7 @@ async function renderAufgaben() {
           <option value="HOCH">Hoch</option>
         </select>
         ${canAssign ? `
-        <select name="zustaendig_user_id" class="select-dark">
-          <option value="">— niemand zuweisen (für alle sichtbar) —</option>
+        <select name="zustaendig_user_ids" class="select-dark task-assignee-select" multiple size="3" title="Strg/Ctrl gedrückt halten, um mehrere Spieler auszuwählen">
           ${spieler.users.map((u) => `<option value="${u.id}">${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)} (${escapeHtml(u.gamertag)})</option>`).join("")}
         </select>` : ""}
         ${state.me.is_admin ? `<input type="number" name="punkte" min="0" placeholder="Punkte" class="num-input" style="width:90px;height:40px;" title="Wie viele Punkte gibt diese Aufgabe? (nur Admin)" />` : ""}
@@ -472,7 +475,7 @@ async function renderAufgaben() {
         body: JSON.stringify({
           titel: f.get("titel"),
           prioritaet: f.get("prioritaet"),
-          zustaendig_user_id: f.get("zustaendig_user_id") ? Number(f.get("zustaendig_user_id")) : null,
+          zustaendig_user_ids: f.getAll("zustaendig_user_ids").map(Number).filter(Boolean),
           punkte: f.get("punkte") ? Number(f.get("punkte")) : 0,
         }),
       });
@@ -510,8 +513,11 @@ function fullTaskHtml(t) {
   else if (t.status === "LAEUFT") actions = `<button class="btn small secondary" data-pause="${t.id}">⏸ Pause</button> <button class="btn small secondary" data-complete="${t.id}">Fertig ✓</button>`;
   else if (t.status === "PAUSIERT") actions = `<button class="btn small secondary" data-resume="${t.id}">▶ Weiter</button> <button class="btn small secondary" data-complete="${t.id}">Fertig ✓</button>`;
   actions += ` <button class="btn small secondary" data-delete="${t.id}">🗑</button>`;
+  const assignees = t.assignees || [];
+  const names = assignees.length ? assignees.map((a) => `${a.vorname} ${a.nachname} (${a.anteil || 100}%)`).join(" / ") : (t.zustaendig_name || "");
+  const splitHint = assignees.length > 1 && t.punkte ? `<div class="task-meta">🪙 Punkte werden gleichmäßig auf ${assignees.length} Spieler verteilt.</div>` : "";
   return `<li class="task-item ${cls}">
-    <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${t.zustaendig_name ? `<div class="task-meta">👷 ${escapeHtml(t.zustaendig_name)}</div>` : ""}</span>
+    <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
     ${actions}
   </li>`;
