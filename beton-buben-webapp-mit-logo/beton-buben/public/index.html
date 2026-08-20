@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BETON-BUBEN · Stadionbau</title>
+<meta name="description" content="Zeiterfassung & Aufgabenplaner für die Beton-Buben Minecraft-Bauabteilung" />
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png" />
+<link rel="apple-touch-icon" href="favicon-512.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="hazard-bar" aria-hidden="true"></div>
+
+<header class="topbar" id="topbar" hidden>
+  <div class="brand">
+    <span class="brand-mark"><img src="logo-icon.png" alt="Beton-Buben Logo" class="brand-logo" /></span>
+    <div class="brand-text">
+      <strong>BETON-BUBEN</strong>
+      <small>STADIONBAU · ZEITERFASSUNG</small>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-view="dashboard" class="tab active">Übersicht</button>
+    <button data-view="aufgaben" class="tab">Aufgaben</button>
+    <button data-view="stadion" class="tab">Stadion-Bau</button>
+    <button data-view="shop" class="tab">Punkte-Shop</button>
+    <button data-view="gruppen" class="tab">Bau-Gruppen</button>
+    <button data-view="kalender" class="tab">Kalender</button>
+    <button data-view="dateien" class="tab">Dokumente & Dateien</button>
+    <button data-view="zeitlog" class="tab">Zeitlog</button>
+    <button data-view="leaderboard" class="tab">Rangliste</button>
+    <button data-view="statistik" class="tab" hidden>Statistik</button>
+    <button data-view="kodex" class="tab">Kodex</button>
+    <button data-view="admin" class="tab admin-only" hidden>Verwaltung</button>
+  </nav>
+  <div class="who">
+    <div class="notif-wrap">
+      <button id="notifBell" class="ghost-btn notif-bell" title="Benachrichtigungen" aria-label="Benachrichtigungen">
+        🔔<span id="notifBadge" class="notif-badge" hidden>0</span>
+      </button>
+      <div id="notifPanel" class="notif-panel" hidden>
+        <div class="notif-panel-head">
+          <strong>Benachrichtigungen</strong>
+          <button id="notifReadAll" class="link-btn">Alle gelesen</button>
+        </div>
+        <div id="notifList" class="notif-list"><div class="empty">Lade …</div></div>
+      </div>
+    </div>
+    <span id="whoAvatar" class="who-avatar"></span>
+    <span id="whoName">–</span>
+    <button id="logoutBtn" class="ghost-btn">Abmelden</button>
+  </div>
+</header>
+
+<main id="app">
+  <!-- Views werden von app.js gerendert -->
+</main>
+
+<footer class="foot">
+  <span>BETON-BUBEN · Stadionbau — läuft auf Cloudflare Pages + D1</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
