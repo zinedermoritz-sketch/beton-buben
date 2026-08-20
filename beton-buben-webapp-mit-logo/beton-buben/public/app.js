@@ -412,6 +412,14 @@ function render() {
 // ---------- Dashboard ----------
 
 async function renderDashboard() {
+  // Laufende Intervalle IMMER zuerst stoppen. Der On/Off-Schalter und die
+  // neuen Start/Pause/Fertig-Buttons rufen renderDashboard() direkt auf
+  // (nicht über render()), daher lief der alte Uhr-Timer sonst einfach
+  // weiter mit — mehrere Intervalle gleichzeitig ließen die Anzeige
+  // durcheinanderspringen bzw. hängen.
+  if (state.tickHandle) clearInterval(state.tickHandle);
+  if (state.workTimerHandle) clearInterval(state.workTimerHandle);
+
   $app.innerHTML = `<div class="empty">Lade Baustelle …</div>`;
   const me = await api("/me");
   state.me = me;
@@ -420,6 +428,7 @@ async function renderDashboard() {
   const [{ tasks }, { layers }] = await Promise.all([api("/tasks"), api("/stadion/layers")]);
   const overviewUsers = [];
   const meineAufgaben = tasks.filter((t) => (t.zustaendig_user_id === me.id || (t.assignees || []).some((a) => a.id === me.id)) && t.status !== "ERLEDIGT").slice(0, 4);
+  const meineLayer = layers.filter((l) => (l.zustaendig_user_id === me.id || (l.assignees || []).some((a) => a.id === me.id)) && l.status !== "FERTIG").slice(0, 4);
   const fertigeLayer = layers.filter((l) => l.status === "FERTIG").length;
   const layerGesamt = layers.length;
   const layerProzent = layerGesamt ? Math.round((fertigeLayer / layerGesamt) * 100) : 0;
@@ -432,7 +441,7 @@ async function renderDashboard() {
     <div class="grid grid-2">
       <div class="panel">
         <h2>Aufgaben in Arbeit</h2>
-        ${meineAufgaben.length ? `<ul class="task-list">${meineAufgaben.map(taskItemHtml).join("")}</ul>` : `<div class="empty">Keine offenen Aufgaben — schau bei „Aufgaben" vorbei.</div>`}
+        ${meineAufgaben.length ? `<ul class="task-list">${meineAufgaben.map(dashboardTaskHtml).join("")}</ul>` : `<div class="empty">Keine offenen Aufgaben — schau bei „Aufgaben" vorbei.</div>`}
       </div>
 
       <div class="panel switch-panel">
@@ -441,6 +450,11 @@ async function renderDashboard() {
         <div class="power-readout" id="liveClock">${me.online ? fmtClock(Date.now() - new Date(me.online_seit)) : "00:00:00"}</div>
         <div class="power-caption">${me.online ? "läuft seit " + fmtDate(me.online_seit) : "Klicke zum Starten"}</div>
       </div>
+    </div>
+
+    <div class="panel">
+      <h2>🏗️ Meine Layer in Arbeit</h2>
+      ${meineLayer.length ? `<ul class="task-list">${meineLayer.map(dashboardLayerHtml).join("")}</ul>` : `<div class="empty">Dir sind aktuell keine Stadion-Layer zugewiesen.</div>`}
     </div>
 
     <div class="grid grid-3">
@@ -493,6 +507,42 @@ async function renderDashboard() {
     catch (e) { alert(e.message); }
   });
 
+  // Aufgaben direkt aus der Übersicht starten/pausieren/fortsetzen/abschließen
+  document.querySelectorAll("[data-start]").forEach((b) => b.onclick = async () => {
+    try { await api(`/tasks/${b.dataset.start}/start`, { method: "POST" }); renderDashboard(); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-pause]").forEach((b) => b.onclick = async () => {
+    try { await api(`/tasks/${b.dataset.pause}/pause`, { method: "POST" }); renderDashboard(); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-resume]").forEach((b) => b.onclick = async () => {
+    try { await api(`/tasks/${b.dataset.resume}/resume`, { method: "POST" }); renderDashboard(); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-complete]").forEach((b) => b.onclick = async () => {
+    try { await api(`/tasks/${b.dataset.complete}/complete`, { method: "POST" }); renderDashboard(); }
+    catch (e) { alert(e.message); }
+  });
+
+  // Dasselbe für Stadion-Layer direkt aus der Übersicht
+  document.querySelectorAll("[data-lstart]").forEach((b) => b.onclick = async () => {
+    try { await api(`/stadion/layers/${b.dataset.lstart}/start`, { method: "POST" }); renderDashboard(); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-lpause]").forEach((b) => b.onclick = async () => {
+    try { await api(`/stadion/layers/${b.dataset.lpause}/pause`, { method: "POST" }); renderDashboard(); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-lresume]").forEach((b) => b.onclick = async () => {
+    try { await api(`/stadion/layers/${b.dataset.lresume}/resume`, { method: "POST" }); renderDashboard(); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-lcomplete]").forEach((b) => b.onclick = async () => {
+    try { await api(`/stadion/layers/${b.dataset.lcomplete}/complete`, { method: "POST" }); renderDashboard(); }
+    catch (e) { alert(e.message); }
+  });
+
   if (me.online) {
     const since = new Date(me.online_seit).getTime();
     state.tickHandle = setInterval(() => {
@@ -500,18 +550,69 @@ async function renderDashboard() {
       if (el) el.textContent = fmtClock(Date.now() - since);
     }, 1000);
   }
+
+  // Live-Timer neben laufenden Aufgaben/Layern (⏱ läuft seit Start)
+  startWorkTimerTicker();
 }
 
 document.querySelectorAll("[data-dashboard-task]").forEach((el) => el.onclick = () => { state.view = "aufgaben"; render(); });
 
 const STATUS_LABEL = { OFFEN: "OFFEN", LAEUFT: "LÄUFT", PAUSIERT: "PAUSE", ERLEDIGT: "ERLEDIGT", FERTIG: "FERTIG" };
 
-function taskItemHtml(t) {
+// Baut die Start/Pause/Weiter/Fertig-Buttons für eine Aufgabe.
+// includeDelete=false für Karten außerhalb der Aufgaben-Verwaltung (z. B. Dashboard).
+function taskActionsHtml(t, { includeDelete = false } = {}) {
+  let actions = "";
+  if (t.status === "OFFEN") actions = `<button class="btn small" data-start="${t.id}">Start</button>`;
+  else if (t.status === "LAEUFT") actions = `<button class="btn small secondary" data-pause="${t.id}">⏸ Pause</button> <button class="btn small secondary" data-complete="${t.id}">Fertig ✓</button>`;
+  else if (t.status === "PAUSIERT") actions = `<button class="btn small secondary" data-resume="${t.id}">▶ Weiter</button> <button class="btn small secondary" data-complete="${t.id}">Fertig ✓</button>`;
+  if (includeDelete) actions += ` <button class="btn small secondary" data-delete="${t.id}">🗑</button>`;
+  return actions;
+}
+
+// Dasselbe für Stadion-Layer.
+function layerActionsHtml(l, { includeDelete = false } = {}) {
+  let actions = "";
+  if (l.status === "OFFEN") actions = `<button class="btn small" data-lstart="${l.id}">Start</button>`;
+  else if (l.status === "LAEUFT") actions = `<button class="btn small secondary" data-lpause="${l.id}">⏸ Pause</button> <button class="btn small secondary" data-lcomplete="${l.id}">Fertig ✓</button>`;
+  else if (l.status === "PAUSIERT") actions = `<button class="btn small secondary" data-lresume="${l.id}">▶ Weiter</button> <button class="btn small secondary" data-lcomplete="${l.id}">Fertig ✓</button>`;
+  if (includeDelete) actions += ` <button class="btn small secondary" data-ldelete="${l.id}">🗑</button>`;
+  return actions;
+}
+
+// Live-Timer-Chip (⏱ 00:00:00), der sich per startWorkTimerTicker() selbst hochzählt,
+// solange die Aufgabe/Layer den Status LAEUFT hat.
+function taskTimerHtml(t) {
+  if (t.status !== "LAEUFT" || !t.start_zeit) return "";
+  return `<span class="work-timer" data-timer-start="${t.start_zeit}">⏱ 00:00:00</span>`;
+}
+function layerTimerHtml(l) {
+  if (l.status !== "LAEUFT" || !l.start_zeit) return "";
+  return `<span class="work-timer" data-timer-start="${l.start_zeit}">⏱ 00:00:00</span>`;
+}
+
+// Aufgaben-Karte für die Dashboard-Übersicht: Start/Pause/Fertig direkt anklickbar,
+// inklusive laufendem Timer — ohne Löschen-Button (der bleibt der Aufgabenverwaltung vorbehalten).
+function dashboardTaskHtml(t) {
   const cls = t.status === "ERLEDIGT" ? "done" : "";
   const names = (t.assignees || []).map((a) => a.vorname + " " + a.nachname).join(" / ") || t.zustaendig_name || "";
   return `<li class="task-item ${cls}">
     <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+    ${taskTimerHtml(t)}
+    ${taskActionsHtml(t)}
+  </li>`;
+}
+
+// Layer-Karte für die Dashboard-Übersicht, analog zu dashboardTaskHtml.
+function dashboardLayerHtml(l) {
+  const cls = l.status === "FERTIG" ? "done" : "";
+  const names = (l.assignees || []).map((a) => a.vorname + " " + a.nachname).join(" / ") || l.zustaendig_name || "";
+  return `<li class="task-item ${cls}">
+    <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}</span>
+    <span class="status-pill ${l.status}">${STATUS_LABEL[l.status] || l.status}</span>
+    ${layerTimerHtml(l)}
+    ${layerActionsHtml(l)}
   </li>`;
 }
 
@@ -617,17 +718,14 @@ async function renderAufgaben() {
 
 function fullTaskHtml(t) {
   const cls = t.status === "ERLEDIGT" ? "done" : "";
-  let actions = "";
-  if (t.status === "OFFEN") actions = `<button class="btn small" data-start="${t.id}">Start</button>`;
-  else if (t.status === "LAEUFT") actions = `<button class="btn small secondary" data-pause="${t.id}">⏸ Pause</button> <button class="btn small secondary" data-complete="${t.id}">Fertig ✓</button>`;
-  else if (t.status === "PAUSIERT") actions = `<button class="btn small secondary" data-resume="${t.id}">▶ Weiter</button> <button class="btn small secondary" data-complete="${t.id}">Fertig ✓</button>`;
-  actions += ` <button class="btn small secondary" data-delete="${t.id}">🗑</button>`;
+  const actions = taskActionsHtml(t, { includeDelete: true });
   const assignees = t.assignees || [];
   const names = assignees.length ? assignees.map((a) => `${a.vorname} ${a.nachname} (${a.anteil || 100}%)`).join(" / ") : (t.zustaendig_name || "");
   const splitHint = assignees.length > 1 && t.punkte ? `<div class="task-meta">🪙 Punkte werden gleichmäßig auf ${assignees.length} Spieler verteilt.</div>` : "";
   return `<li class="task-item ${cls}">
     <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+    ${taskTimerHtml(t)}
     ${actions}
   </li>`;
 }
@@ -744,11 +842,7 @@ async function renderStadion() {
 
 function layerItemHtml(l, canAssign) {
   const cls = l.status === "FERTIG" ? "done" : "";
-  let actions = "";
-  if (l.status === "OFFEN") actions = `<button class="btn small" data-lstart="${l.id}">Start</button>`;
-  else if (l.status === "LAEUFT") actions = `<button class="btn small secondary" data-lpause="${l.id}">⏸ Pause</button> <button class="btn small secondary" data-lcomplete="${l.id}">Fertig ✓</button>`;
-  else if (l.status === "PAUSIERT") actions = `<button class="btn small secondary" data-lresume="${l.id}">▶ Weiter</button> <button class="btn small secondary" data-lcomplete="${l.id}">Fertig ✓</button>`;
-  if (canAssign) actions += ` <button class="btn small secondary" data-ldelete="${l.id}">🗑</button>`;
+  const actions = layerActionsHtml(l, { includeDelete: canAssign });
   const assignees = l.assignees || [];
   const names = assignees.length
     ? assignees.map((a) => `${a.vorname} ${a.nachname}${assignees.length > 1 ? ` (${a.anteil || 100}%)` : ""}`).join(" / ")
@@ -757,6 +851,7 @@ function layerItemHtml(l, canAssign) {
   return `<li class="task-item ${cls}">
     <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
     <span class="status-pill ${l.status}">${STATUS_LABEL[l.status] || l.status}</span>
+    ${layerTimerHtml(l)}
     ${actions}
   </li>`;
 }
