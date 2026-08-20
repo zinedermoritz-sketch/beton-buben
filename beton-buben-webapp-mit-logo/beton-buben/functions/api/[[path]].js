@@ -1,9 +1,28 @@
-
-
-
 // BETON-BUBEN · STADIONBAU — Backend-API
 // Läuft als Cloudflare Pages Function unter /api/*
 // Benötigt: D1-Binding "DB" + Secret "JWT_SECRET" (siehe README.md)
+//
+// WICHTIG — Migration nötig für Mehrfach-Zuweisung:
+// Bevor dieses Update live geht, folgendes SQL einmalig gegen die D1-DB ausführen
+// (z. B. via `wrangler d1 execute DB --file=migration.sql`):
+//
+//   CREATE TABLE IF NOT EXISTS task_zuweisungen (
+//     id INTEGER PRIMARY KEY AUTOINCREMENT,
+//     task_id INTEGER NOT NULL,
+//     user_id INTEGER NOT NULL,
+//     anteil INTEGER NOT NULL DEFAULT 100,
+//     UNIQUE(task_id, user_id)
+//   );
+//   CREATE TABLE IF NOT EXISTS layer_zuweisungen (
+//     id INTEGER PRIMARY KEY AUTOINCREMENT,
+//     layer_id INTEGER NOT NULL,
+//     user_id INTEGER NOT NULL,
+//     anteil INTEGER NOT NULL DEFAULT 100,
+//     UNIQUE(layer_id, user_id)
+//   );
+//
+// Bestehende Einzel-Zuweisungen (zustaendig_user_id) bleiben unangetastet und
+// werden beim nächsten Start/Zuweisen automatisch in die neue Tabelle übernommen.
 
 // ---------- Hilfsfunktionen ----------
 
@@ -160,6 +179,101 @@ async function completedTasksCountFor(env, userId) {
     .bind(userId)
     .first();
   return row.c || 0;
+}
+
+// ---------- Mehrfach-Zuweisung (Aufgaben & Layer) ----------
+
+// Liest die Zuweisungsliste einer Aufgabe inkl. Spieler-Infos.
+async function getTaskAssignees(env, taskId) {
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.vorname, u.nachname, u.gamertag, u.avatar, tz.anteil
+     FROM task_zuweisungen tz JOIN users u ON u.id = tz.user_id
+     WHERE tz.task_id = ? ORDER BY u.vorname`
+  ).bind(taskId).all();
+  return results.map((r) => ({ id: r.id, vorname: r.vorname, nachname: r.nachname, gamertag: r.gamertag, anteil: r.anteil, avatar: avatarFor(r) }));
+}
+
+async function getLayerAssignees(env, layerId) {
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.vorname, u.nachname, u.gamertag, u.avatar, lz.anteil
+     FROM layer_zuweisungen lz JOIN users u ON u.id = lz.user_id
+     WHERE lz.layer_id = ? ORDER BY u.vorname`
+  ).bind(layerId).all();
+  return results.map((r) => ({ id: r.id, vorname: r.vorname, nachname: r.nachname, gamertag: r.gamertag, anteil: r.anteil, avatar: avatarFor(r) }));
+}
+
+// Ersetzt die Zuweisungsliste einer Aufgabe/Layer komplett durch die übergebenen User-IDs
+// und verteilt die Anteile gleichmäßig (für die Punkte-Aufteilung).
+async function setTaskAssignees(env, taskId, userIds) {
+  await env.DB.prepare("DELETE FROM task_zuweisungen WHERE task_id = ?").bind(taskId).run();
+  const uniq = [...new Set(userIds)];
+  if (!uniq.length) return;
+  const anteil = Math.round(100 / uniq.length);
+  for (const uid of uniq) {
+    await env.DB.prepare("INSERT OR IGNORE INTO task_zuweisungen (task_id, user_id, anteil) VALUES (?, ?, ?)").bind(taskId, uid, anteil).run();
+  }
+}
+
+async function setLayerAssignees(env, layerId, userIds) {
+  await env.DB.prepare("DELETE FROM layer_zuweisungen WHERE layer_id = ?").bind(layerId).run();
+  const uniq = [...new Set(userIds)];
+  if (!uniq.length) return;
+  const anteil = Math.round(100 / uniq.length);
+  for (const uid of uniq) {
+    await env.DB.prepare("INSERT OR IGNORE INTO layer_zuweisungen (layer_id, user_id, anteil) VALUES (?, ?, ?)").bind(layerId, uid, anteil).run();
+  }
+}
+
+async function taskAssigneeIds(env, taskId) {
+  const { results } = await env.DB.prepare("SELECT user_id FROM task_zuweisungen WHERE task_id = ?").bind(taskId).all();
+  return results.map((r) => r.user_id);
+}
+
+async function layerAssigneeIds(env, layerId) {
+  const { results } = await env.DB.prepare("SELECT user_id FROM layer_zuweisungen WHERE layer_id = ?").bind(layerId).all();
+  return results.map((r) => r.user_id);
+}
+
+// Ist dieser Nutzer für die Aufgabe zuständig? (Einzel-Feld ODER Mehrfach-Zuweisung)
+async function isAssignedToTask(env, task, userId) {
+  if (task.zustaendig_user_id === userId) return true;
+  const ids = await taskAssigneeIds(env, task.id);
+  return ids.includes(userId);
+}
+
+async function isAssignedToLayer(env, layer, userId) {
+  if (layer.zustaendig_user_id === userId) return true;
+  const ids = await layerAssigneeIds(env, layer.id);
+  return ids.includes(userId);
+}
+
+// Hängt an eine Liste von Aufgaben/Layern die jeweilige assignees-Liste an.
+async function attachTaskAssignees(env, tasks) {
+  const out = [];
+  for (const t of tasks) out.push({ ...t, assignees: await getTaskAssignees(env, t.id) });
+  return out;
+}
+async function attachLayerAssignees(env, layers) {
+  const out = [];
+  for (const l of layers) out.push({ ...l, assignees: await getLayerAssignees(env, l.id) });
+  return out;
+}
+
+// Verteilt Punkte beim Abschluss gleichmäßig auf alle Zuständigen (oder an den
+// einzelnen Zuständigen/den ausführenden Nutzer, falls keine Mehrfach-Zuweisung besteht).
+async function verteilePunkte(env, punkte, assignees, fallbackUserId) {
+  if (!punkte || punkte <= 0) return;
+  if (assignees && assignees.length) {
+    const anteil = Math.floor(punkte / assignees.length);
+    let rest = punkte - anteil * assignees.length;
+    for (const a of assignees) {
+      const teil = anteil + (rest > 0 ? 1 : 0);
+      if (rest > 0) rest -= 1;
+      await addPunkte(env, a.id, teil);
+    }
+  } else if (fallbackUserId) {
+    await addPunkte(env, fallbackUserId, punkte);
+  }
 }
 
 // ---------- Benachrichtigungen ----------
@@ -514,22 +628,32 @@ export async function onRequest(context) {
 
     if (path === "/tasks" && method === "GET") {
       const { results } = await env.DB.prepare("SELECT * FROM tasks ORDER BY id DESC LIMIT 200").all();
-      return json({ tasks: results });
+      return json({ tasks: await attachTaskAssignees(env, results) });
     }
 
     if (path === "/tasks" && method === "POST") {
-      const { titel, notiz, prioritaet, zustaendig_user_id, punkte } = body;
+      const { titel, notiz, prioritaet, zustaendig_user_id, zustaendig_user_ids, punkte } = body;
       if (!titel || !titel.trim()) return err("Aufgabentitel fehlt.");
+
+      // Mehrfach-Zuweisung hat Vorrang, sonst Einzel-Feld für Rückwärtskompatibilität.
+      let ids = Array.isArray(zustaendig_user_ids) ? zustaendig_user_ids.map((x) => Number(x)).filter(Boolean) : [];
+      if (!ids.length && zustaendig_user_id) ids = [Number(zustaendig_user_id)];
 
       let zId = null;
       let zName = null;
       let zugewiesenVon = null;
-      if (zustaendig_user_id) {
+      let assignedTargets = [];
+      if (ids.length) {
         if (!canAssign) return err("Keine Berechtigung, Aufgaben zuzuweisen.", 403);
-        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(zustaendig_user_id).first();
-        if (!target) return err("Spieler nicht gefunden.", 404);
-        zId = target.id;
-        zName = `${target.vorname} ${target.nachname}`;
+        for (const uid of ids) {
+          const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(uid).first();
+          if (!target) return err("Spieler nicht gefunden.", 404);
+          assignedTargets.push(target);
+        }
+        zId = assignedTargets[0].id;
+        zName = assignedTargets.length > 1
+          ? assignedTargets.map((t) => `${t.vorname} ${t.nachname}`).join(" / ")
+          : `${assignedTargets[0].vorname} ${assignedTargets[0].nachname}`;
         zugewiesenVon = user.id;
       }
 
@@ -543,10 +667,19 @@ export async function onRequest(context) {
         .bind(titel.trim(), zId, zName, zugewiesenVon, prioritaet || "NORMAL", notiz || "", nowIso(), user.id, pkt)
         .run();
 
-      if (zId) {
-        await notify(env, zId, "AUFGABE_ZUGEWIESEN", "Neue Aufgabe zugewiesen", `${meName} hat dir „${titel.trim()}" zugewiesen.`, "aufgaben");
+      const newId = res.meta.last_row_id;
+      if (ids.length) {
+        await setTaskAssignees(env, newId, assignedTargets.map((t) => t.id));
+        await notifyMany(
+          env,
+          assignedTargets.map((t) => t.id),
+          "AUFGABE_ZUGEWIESEN",
+          "Neue Aufgabe zugewiesen",
+          `${meName} hat dir „${titel.trim()}" zugewiesen.`,
+          "aufgaben"
+        );
       }
-      return json({ id: res.meta.last_row_id });
+      return json({ id: newId });
     }
 
     const taskStartMatch = path.match(/^\/tasks\/(\d+)\/start$/);
@@ -555,7 +688,8 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "OFFEN") return err("Aufgabe kann nicht gestartet werden.");
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) {
+      const hatZuweisung = task.zustaendig_user_id || (await taskAssigneeIds(env, id)).length > 0;
+      if (hatZuweisung && !(await isAssignedToTask(env, task, user.id)) && !canAssign) {
         return err("Diese Aufgabe ist bereits jemand anderem zugewiesen.", 403);
       }
       await env.DB.prepare(
@@ -563,6 +697,7 @@ export async function onRequest(context) {
       )
         .bind(nowIso(), task.zustaendig_user_id || user.id, task.zustaendig_name || meName, id)
         .run();
+      if (!hatZuweisung) await setTaskAssignees(env, id, [user.id]);
       return json({ ok: true });
     }
 
@@ -572,7 +707,7 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "LAEUFT") return err("Nur laufende Aufgaben können pausiert werden.");
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      if (!(await isAssignedToTask(env, task, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -583,7 +718,7 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "PAUSIERT") return err("Nur pausierte Aufgaben können fortgesetzt werden.");
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      if (!(await isAssignedToTask(env, task, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE tasks SET status = 'LAEUFT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -593,12 +728,13 @@ export async function onRequest(context) {
       const id = taskCompleteMatch[1];
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
-      if (task.zustaendig_user_id && task.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      if (!(await isAssignedToTask(env, task, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ? WHERE id = ?")
         .bind(nowIso(), id)
         .run();
+      const assignees = await getTaskAssignees(env, id);
       const empfaenger = task.zustaendig_user_id || user.id;
-      if (task.punkte > 0) await addPunkte(env, empfaenger, task.punkte);
+      await verteilePunkte(env, task.punkte, assignees, empfaenger);
       await notifyMany(
         env,
         [task.zugewiesen_von, task.erstellt_von].filter((x) => x && x !== user.id),
@@ -616,6 +752,7 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (!user.is_admin && task.erstellt_von !== user.id) return err("Keine Berechtigung.", 403);
+      await env.DB.prepare("DELETE FROM task_zuweisungen WHERE task_id = ?").bind(id).run();
       await env.DB.prepare("DELETE FROM tasks WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -709,21 +846,32 @@ export async function onRequest(context) {
 
     if (path === "/stadion/layers" && method === "GET") {
       const { results } = await env.DB.prepare("SELECT * FROM stadium_layers ORDER BY layer_nr ASC").all();
-      return json({ layers: results });
+      return json({ layers: await attachLayerAssignees(env, results) });
     }
 
     if (path === "/stadion/layers" && method === "POST") {
       if (!canAssign) return err("Keine Berechtigung, Stadion-Layer anzulegen.", 403);
-      const { name, punkte, zustaendig_user_id } = body;
+      const { name, punkte, zustaendig_user_id, zustaendig_user_ids } = body;
       if (!name || !name.trim()) return err("Name der Layer fehlt.");
       const maxRow = await env.DB.prepare("SELECT COALESCE(MAX(layer_nr),0) AS m FROM stadium_layers").first();
       const nr = (maxRow.m || 0) + 1;
 
+      let ids = Array.isArray(zustaendig_user_ids) ? zustaendig_user_ids.map((x) => Number(x)).filter(Boolean) : [];
+      if (!ids.length && zustaendig_user_id) ids = [Number(zustaendig_user_id)];
+
       let zId = null, zName = null, zugewiesenVon = null;
-      if (zustaendig_user_id) {
-        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(zustaendig_user_id).first();
-        if (!target) return err("Spieler nicht gefunden.", 404);
-        zId = target.id; zName = `${target.vorname} ${target.nachname}`; zugewiesenVon = user.id;
+      let assignedTargets = [];
+      if (ids.length) {
+        for (const uid of ids) {
+          const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(uid).first();
+          if (!target) return err("Spieler nicht gefunden.", 404);
+          assignedTargets.push(target);
+        }
+        zId = assignedTargets[0].id;
+        zName = assignedTargets.length > 1
+          ? assignedTargets.map((t) => `${t.vorname} ${t.nachname}`).join(" / ")
+          : `${assignedTargets[0].vorname} ${assignedTargets[0].nachname}`;
+        zugewiesenVon = user.id;
       }
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
 
@@ -734,8 +882,19 @@ export async function onRequest(context) {
         .bind(nr, name.trim(), zId, zName, zugewiesenVon, pkt, nowIso(), user.id)
         .run();
 
-      if (zId) await notify(env, zId, "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${name.trim()}" zugewiesen.`, "stadion");
-      return json({ id: res.meta.last_row_id, layer_nr: nr });
+      const newId = res.meta.last_row_id;
+      if (ids.length) {
+        await setLayerAssignees(env, newId, assignedTargets.map((t) => t.id));
+        await notifyMany(
+          env,
+          assignedTargets.map((t) => t.id),
+          "LAYER_ZUGEWIESEN",
+          "Stadion-Layer zugewiesen",
+          `${meName} hat dir die Layer „${name.trim()}" zugewiesen.`,
+          "stadion"
+        );
+      }
+      return json({ id: newId, layer_nr: nr });
     }
 
     const layerAssignMatch = path.match(/^\/stadion\/layers\/(\d+)\/zuweisen$/);
@@ -744,16 +903,28 @@ export async function onRequest(context) {
       const id = layerAssignMatch[1];
       const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
       if (!layer) return err("Layer nicht gefunden.", 404);
-      const { user_id } = body;
+      const { user_id, user_ids } = body;
+      let ids = Array.isArray(user_ids) ? user_ids.map((x) => Number(x)).filter(Boolean) : [];
+      if (!ids.length && user_id) ids = [Number(user_id)];
       let zId = null, zName = null;
-      if (user_id) {
-        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(user_id).first();
-        if (!target) return err("Spieler nicht gefunden.", 404);
-        zId = target.id; zName = `${target.vorname} ${target.nachname}`;
+      let assignedTargets = [];
+      if (ids.length) {
+        for (const uid of ids) {
+          const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(uid).first();
+          if (!target) return err("Spieler nicht gefunden.", 404);
+          assignedTargets.push(target);
+        }
+        zId = assignedTargets[0].id;
+        zName = assignedTargets.length > 1
+          ? assignedTargets.map((t) => `${t.vorname} ${t.nachname}`).join(" / ")
+          : `${assignedTargets[0].vorname} ${assignedTargets[0].nachname}`;
       }
       await env.DB.prepare("UPDATE stadium_layers SET zustaendig_user_id = ?, zustaendig_name = ?, zugewiesen_von = ? WHERE id = ?")
         .bind(zId, zName, user.id, id).run();
-      if (zId) await notify(env, zId, "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${layer.name}" zugewiesen.`, "stadion");
+      await setLayerAssignees(env, id, assignedTargets.map((t) => t.id));
+      if (assignedTargets.length) {
+        await notifyMany(env, assignedTargets.map((t) => t.id), "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${layer.name}" zugewiesen.`, "stadion");
+      }
       return json({ ok: true });
     }
 
@@ -763,9 +934,11 @@ export async function onRequest(context) {
       const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
       if (!layer) return err("Layer nicht gefunden.", 404);
       if (layer.status !== "OFFEN") return err("Layer kann nicht gestartet werden.");
-      if (layer.zustaendig_user_id && layer.zustaendig_user_id !== user.id && !canAssign) return err("Diese Layer ist bereits jemand anderem zugewiesen.", 403);
+      const hatZuweisung = layer.zustaendig_user_id || (await layerAssigneeIds(env, id)).length > 0;
+      if (hatZuweisung && !(await isAssignedToLayer(env, layer, user.id)) && !canAssign) return err("Diese Layer ist bereits jemand anderem zugewiesen.", 403);
       await env.DB.prepare("UPDATE stadium_layers SET status = 'LAEUFT', start_zeit = ?, zustaendig_user_id = ?, zustaendig_name = ? WHERE id = ?")
         .bind(nowIso(), layer.zustaendig_user_id || user.id, layer.zustaendig_name || meName, id).run();
+      if (!hatZuweisung) await setLayerAssignees(env, id, [user.id]);
       return json({ ok: true });
     }
 
@@ -775,7 +948,7 @@ export async function onRequest(context) {
       const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
       if (!layer) return err("Layer nicht gefunden.", 404);
       if (layer.status !== "LAEUFT") return err("Nur laufende Layer können pausiert werden.");
-      if (layer.zustaendig_user_id && layer.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      if (!(await isAssignedToLayer(env, layer, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE stadium_layers SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -786,7 +959,7 @@ export async function onRequest(context) {
       const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
       if (!layer) return err("Layer nicht gefunden.", 404);
       if (layer.status !== "PAUSIERT") return err("Nur pausierte Layer können fortgesetzt werden.");
-      if (layer.zustaendig_user_id && layer.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      if (!(await isAssignedToLayer(env, layer, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE stadium_layers SET status = 'LAEUFT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
@@ -796,10 +969,11 @@ export async function onRequest(context) {
       const id = layerCompleteMatch[1];
       const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
       if (!layer) return err("Layer nicht gefunden.", 404);
-      if (layer.zustaendig_user_id && layer.zustaendig_user_id !== user.id && !canAssign) return err("Keine Berechtigung.", 403);
+      if (!(await isAssignedToLayer(env, layer, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
       await env.DB.prepare("UPDATE stadium_layers SET status = 'FERTIG', end_zeit = ? WHERE id = ?").bind(nowIso(), id).run();
+      const assignees = await getLayerAssignees(env, id);
       const empfaenger = layer.zustaendig_user_id || user.id;
-      if (layer.punkte > 0) await addPunkte(env, empfaenger, layer.punkte);
+      await verteilePunkte(env, layer.punkte, assignees, empfaenger);
       await notifyMany(
         env,
         [layer.zugewiesen_von].filter((x) => x && x !== user.id),
@@ -814,6 +988,7 @@ export async function onRequest(context) {
     const layerDeleteMatch = path.match(/^\/stadion\/layers\/(\d+)$/);
     if (layerDeleteMatch && method === "DELETE") {
       if (!user.is_admin && !canAssign) return err("Keine Berechtigung.", 403);
+      await env.DB.prepare("DELETE FROM layer_zuweisungen WHERE layer_id = ?").bind(layerDeleteMatch[1]).run();
       await env.DB.prepare("DELETE FROM stadium_layers WHERE id = ?").bind(layerDeleteMatch[1]).run();
       return json({ ok: true });
     }
@@ -1198,6 +1373,27 @@ export async function onRequest(context) {
       const target = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(id).first();
       if (!target) return err("Konto nicht gefunden.", 404);
       await env.DB.prepare("UPDATE users SET aktiv = ? WHERE id = ?").bind(target.aktiv ? 0 : 1, id).run();
+      return json({ ok: true });
+    }
+
+    // Bucht Punkte auf ein Spielerkonto (positiv = gutschreiben, negativ = abziehen).
+    const addPointsMatch = path.match(/^\/admin\/konten\/(\d+)\/punkte$/);
+    if (addPointsMatch && method === "POST") {
+      if (!user.is_admin) return err("Nur für Admins.", 403);
+      const id = addPointsMatch[1];
+      const target = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(id).first();
+      if (!target) return err("Konto nicht gefunden.", 404);
+      const delta = parseInt(body.punkte);
+      if (!Number.isFinite(delta) || delta === 0) return err("Bitte eine gültige Punktzahl ungleich 0 angeben.");
+      await addPunkte(env, target.id, delta);
+      await notify(
+        env,
+        target.id,
+        "PUNKTE_GUTSCHRIFT",
+        delta > 0 ? "Punkte gutgeschrieben" : "Punkte abgezogen",
+        `${meName} hat dir ${delta > 0 ? "+" : ""}${delta} Punkte gebucht.`,
+        "shop"
+      );
       return json({ ok: true });
     }
 
