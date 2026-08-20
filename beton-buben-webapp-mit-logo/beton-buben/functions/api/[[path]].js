@@ -384,7 +384,7 @@ export async function onRequest(context) {
       if (!user.is_admin) return err("Nur für Admins.", 403);
       const { name, level, kann_aufgaben_zuweisen, kann_statistiken_sehen, kann_kalender_erstellen, farbe } = body;
       if (!name || !name.trim()) return err("Rangname fehlt.");
-      if (name.trim().toLowerCase() === "sklave") return err('Der Rang "Sklave" existiert bereits als niedrigster Rang.');
+      if (name.trim().toLowerCase() === "sklave") return err("Der Rang „Sklave" existiert bereits als niedrigster Rang.");
       const existing = await env.DB.prepare("SELECT id FROM ranks WHERE name = ?").bind(name.trim()).first();
       if (existing) return err("Dieser Rang existiert bereits.");
       const res = await env.DB.prepare(
@@ -688,33 +688,53 @@ export async function onRequest(context) {
 
     if (path === "/stadion/layers" && method === "GET") {
       const { results } = await env.DB.prepare("SELECT * FROM stadium_layers ORDER BY layer_nr ASC").all();
+      for (const layer of results) {
+        try {
+          const { results: assignees } = await env.DB.prepare(
+            `SELECT u.id, u.vorname, u.nachname, u.gamertag, u.avatar, la.anteil
+             FROM layer_assignees la JOIN users u ON u.id = la.user_id
+             WHERE la.layer_id = ? ORDER BY u.vorname`
+          ).bind(layer.id).all();
+          layer.assignees = assignees.map((a) => ({ ...a, avatar: avatarFor(a) }));
+        } catch (_) { layer.assignees = []; }
+      }
       return json({ layers: results });
     }
 
     if (path === "/stadion/layers" && method === "POST") {
-      if (!canAssign) return err("Keine Berechtigung, Stadion-Layer anzulegen.", 403);
-      const { name, punkte, zustaendig_user_id } = body;
+      if (!canAssign) return err("Keine Berechtigung, Layer zuzuweisen.", 403);
+      const { name, zustaendig_user_id, zustaendig_user_ids, punkte } = body;
       if (!name || !name.trim()) return err("Name der Layer fehlt.");
       const maxRow = await env.DB.prepare("SELECT COALESCE(MAX(layer_nr),0) AS m FROM stadium_layers").first();
       const nr = (maxRow.m || 0) + 1;
-
-      let zId = null, zName = null, zugewiesenVon = null;
-      if (zustaendig_user_id) {
-        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(zustaendig_user_id).first();
-        if (!target) return err("Spieler nicht gefunden.", 404);
-        zId = target.id; zName = `${target.vorname} ${target.nachname}`; zugewiesenVon = user.id;
+      let ids = Array.isArray(zustaendig_user_ids) ? zustaendig_user_ids.map(Number).filter(Boolean) : [];
+      if (!ids.length && zustaendig_user_id) ids = [Number(zustaendig_user_id)];
+      ids = [...new Set(ids)];
+      const targets = [];
+      for (const id of ids) {
+        const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(id).first();
+        if (!target) return err("Mindestens ein ausgewählter Spieler wurde nicht gefunden.", 404);
+        targets.push(target);
       }
+      const zId = targets[0]?.id || null;
+      const zName = targets.length ? targets.map((t) => `${t.vorname} ${t.nachname}`).join(" / ") : null;
+      const zugewiesenVon = targets.length ? user.id : null;
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
-
       const res = await env.DB.prepare(
         `INSERT INTO stadium_layers (layer_nr, name, status, zustaendig_user_id, zustaendig_name, zugewiesen_von, punkte, erstellt_am, erstellt_von)
          VALUES (?, ?, 'OFFEN', ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(nr, name.trim(), zId, zName, zugewiesenVon, pkt, nowIso(), user.id)
-        .run();
-
-      if (zId) await notify(env, zId, "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${name.trim()}" zugewiesen.`, "stadion");
-      return json({ id: res.meta.last_row_id, layer_nr: nr });
+      ).bind(nr, name.trim(), zId, zName, zugewiesenVon, pkt, nowIso(), user.id).run();
+      const layerId = res.meta.last_row_id;
+      if (targets.length) {
+        const share = Math.floor(100 / targets.length);
+        const remainder = 100 - share * targets.length;
+        for (let i = 0; i < targets.length; i++) {
+          await env.DB.prepare("INSERT INTO layer_assignees (layer_id, user_id, anteil) VALUES (?, ?, ?)")
+            .bind(layerId, targets[i].id, share + (i === 0 ? remainder : 0)).run();
+        }
+        await notifyMany(env, targets.map((t) => t.id), "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${name.trim()}" zugewiesen.`, "stadion");
+      }
+      return json({ id: layerId, layer_nr: nr });
     }
 
     const layerAssignMatch = path.match(/^\/stadion\/layers\/(\d+)\/zuweisen$/);
@@ -793,7 +813,8 @@ export async function onRequest(context) {
     const layerDeleteMatch = path.match(/^\/stadion\/layers\/(\d+)$/);
     if (layerDeleteMatch && method === "DELETE") {
       if (!user.is_admin && !canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("DELETE FROM stadium_layers WHERE id = ?").bind(layerDeleteMatch[1]).run();
+      await env.DB.prepare("DELETE FROM layer_assignees WHERE layer_id = ?").bind(layerDeleteMatch[1]).run();
+       await env.DB.prepare("DELETE FROM stadium_layers WHERE id = ?").bind(layerDeleteMatch[1]).run();
       return json({ ok: true });
     }
 
@@ -1158,6 +1179,23 @@ export async function onRequest(context) {
       return json({ profile: out });
     }
 
+
+    if (path === "/overview/stats" && method === "GET") {
+      const { results: users2 } = await env.DB.prepare(
+        `SELECT id, vorname, nachname, gamertag, aktiv FROM users WHERE freigegeben = 1 ORDER BY vorname, nachname`
+      ).all();
+      const profile = [];
+      for (const u of users2) {
+        profile.push({
+          vorname: u.vorname,
+          nachname: u.nachname,
+          gesamt_std: await totalHoursFor(env, u.gamertag),
+          aufgaben_erledigt: await completedTasksCountFor(env, u.id),
+        });
+      }
+      return json({ profile });
+    }
+
     // ---- ADMIN ----
 
     if (path === "/admin/konten" && method === "GET") {
@@ -1168,6 +1206,19 @@ export async function onRequest(context) {
          FROM users u LEFT JOIN ranks r ON r.id = u.rank_id ORDER BY u.freigegeben ASC, u.id`
       ).all();
       return json({ konten: results });
+    }
+
+
+    const pointsMatch = path.match(/^\/admin\/konten\/(\d+)\/punkte$/);
+    if (pointsMatch && method === "POST") {
+      if (!user.is_admin) return err("Nur für Admins.", 403);
+      const id = Number(pointsMatch[1]);
+      const punkte = Number(body.punkte);
+      if (!Number.isInteger(punkte) || punkte <= 0) return err("Punkte müssen eine positive ganze Zahl sein.");
+      const target = await env.DB.prepare("SELECT id FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(id).first();
+      if (!target) return err("Spieler nicht gefunden.", 404);
+      await addPunkte(env, id, punkte);
+      return json({ ok: true, punkte });
     }
 
     const toggleMatch = path.match(/^\/admin\/konten\/(\d+)\/toggle$/);
