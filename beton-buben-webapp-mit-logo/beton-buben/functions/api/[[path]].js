@@ -23,6 +23,15 @@
 //
 // Bestehende Einzel-Zuweisungen (zustaendig_user_id) bleiben unangetastet und
 // werden beim nächsten Start/Zuweisen automatisch in die neue Tabelle übernommen.
+//
+// WICHTIG — Migration für erwartete Zeit / Countdown auf Aufgaben:
+//
+//   ALTER TABLE tasks ADD COLUMN erwartete_sekunden INTEGER NOT NULL DEFAULT 0;
+//   ALTER TABLE tasks ADD COLUMN verbrauchte_sekunden INTEGER NOT NULL DEFAULT 0;
+//
+// erwartete_sekunden: beim Anlegen optional gesetzte Zielzeit (aus erwartete_minuten * 60).
+// verbrauchte_sekunden: Summe aller bereits abgeschlossenen LAEUFT-Phasen (wird bei
+// Pause/Fertig fortgeschrieben); zusammen mit start_zeit ergibt sich der Live-Countdown.
 
 // ---------- Hilfsfunktionen ----------
 
@@ -659,12 +668,15 @@ export async function onRequest(context) {
 
       // Nur der Admin darf festlegen, wie viele Punkte eine Aufgabe bringt.
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
+      // Erwartete Zeit (Minuten) darf jeder beim Anlegen mitgeben — reine Schätzung,
+      // die im Frontend als Countdown ab dem Start runterzählt.
+      const erwSek = Math.max(0, parseInt(body.erwartete_minuten) || 0) * 60;
 
       const res = await env.DB.prepare(
-        `INSERT INTO tasks (titel, zustaendig_user_id, zustaendig_name, zugewiesen_von, status, prioritaet, notiz, erstellt_am, erstellt_von, punkte)
-         VALUES (?, ?, ?, ?, 'OFFEN', ?, ?, ?, ?, ?)`
+        `INSERT INTO tasks (titel, zustaendig_user_id, zustaendig_name, zugewiesen_von, status, prioritaet, notiz, erstellt_am, erstellt_von, punkte, erwartete_sekunden)
+         VALUES (?, ?, ?, ?, 'OFFEN', ?, ?, ?, ?, ?, ?)`
       )
-        .bind(titel.trim(), zId, zName, zugewiesenVon, prioritaet || "NORMAL", notiz || "", nowIso(), user.id, pkt)
+        .bind(titel.trim(), zId, zName, zugewiesenVon, prioritaet || "NORMAL", notiz || "", nowIso(), user.id, pkt, erwSek)
         .run();
 
       const newId = res.meta.last_row_id;
@@ -680,6 +692,37 @@ export async function onRequest(context) {
         );
       }
       return json({ id: newId });
+    }
+
+    // Offene Aufgabe (egal ob unzugewiesen oder jemand anderem zugewiesen) freiwillig
+    // annehmen. Fügt den Nutzer als weitere:n Zuständige:n hinzu, ohne bestehende
+    // Zuweisungen zu entfernen — Punkte werden bei Abschluss dann anteilig verteilt.
+    const taskAcceptMatch = path.match(/^\/tasks\/(\d+)\/annehmen$/);
+    if (taskAcceptMatch && method === "POST") {
+      const id = taskAcceptMatch[1];
+      const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
+      if (!task) return err("Aufgabe nicht gefunden.", 404);
+      if (task.status !== "OFFEN") return err("Nur offene Aufgaben können angenommen werden.");
+      if (await isAssignedToTask(env, task, user.id)) return err("Du bist dieser Aufgabe bereits zugewiesen.");
+
+      const currentIds = await taskAssigneeIds(env, id);
+      const newIds = [...currentIds, user.id];
+      await setTaskAssignees(env, id, newIds);
+      const alleZugewiesenen = await getTaskAssignees(env, id);
+      const zName = alleZugewiesenen.map((a) => `${a.vorname} ${a.nachname}`).join(" / ");
+      await env.DB.prepare("UPDATE tasks SET zustaendig_user_id = ?, zustaendig_name = ? WHERE id = ?")
+        .bind(task.zustaendig_user_id || user.id, zName, id)
+        .run();
+
+      await notifyMany(
+        env,
+        [...currentIds, task.zugewiesen_von, task.erstellt_von].filter((x) => x && x !== user.id),
+        "AUFGABE_ZUGEWIESEN",
+        "Aufgabe angenommen",
+        `${meName} hat sich die offene Aufgabe „${task.titel}" freiwillig geschnappt.`,
+        "aufgaben"
+      );
+      return json({ ok: true });
     }
 
     const taskStartMatch = path.match(/^\/tasks\/(\d+)\/start$/);
@@ -708,7 +751,13 @@ export async function onRequest(context) {
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "LAEUFT") return err("Nur laufende Aufgaben können pausiert werden.");
       if (!(await isAssignedToTask(env, task, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
+      // Gelaufene Zeit seit dem letzten Start/Weiter aufsummieren, damit der Countdown
+      // beim Pausieren exakt einfriert und beim Fortsetzen dort weiterläuft.
+      const zusatz = task.start_zeit ? Math.max(0, (Date.now() - new Date(task.start_zeit).getTime()) / 1000) : 0;
+      const neueVerbrauchteSekunden = Math.round((task.verbrauchte_sekunden || 0) + zusatz);
+      await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT', verbrauchte_sekunden = ? WHERE id = ?")
+        .bind(neueVerbrauchteSekunden, id)
+        .run();
       return json({ ok: true });
     }
 
@@ -719,7 +768,9 @@ export async function onRequest(context) {
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (task.status !== "PAUSIERT") return err("Nur pausierte Aufgaben können fortgesetzt werden.");
       if (!(await isAssignedToTask(env, task, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("UPDATE tasks SET status = 'LAEUFT' WHERE id = ?").bind(id).run();
+      await env.DB.prepare("UPDATE tasks SET status = 'LAEUFT', start_zeit = ? WHERE id = ?")
+        .bind(nowIso(), id)
+        .run();
       return json({ ok: true });
     }
 
@@ -729,8 +780,14 @@ export async function onRequest(context) {
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
       if (!task) return err("Aufgabe nicht gefunden.", 404);
       if (!(await isAssignedToTask(env, task, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ? WHERE id = ?")
-        .bind(nowIso(), id)
+      // Falls die Aufgabe noch lief (nicht über Pause abgeschlossen), die letzte
+      // laufende Phase noch mit in die verbrauchte Zeit einrechnen.
+      let verbrauchte = task.verbrauchte_sekunden || 0;
+      if (task.status === "LAEUFT" && task.start_zeit) {
+        verbrauchte += Math.max(0, (Date.now() - new Date(task.start_zeit).getTime()) / 1000);
+      }
+      await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ?, verbrauchte_sekunden = ? WHERE id = ?")
+        .bind(nowIso(), Math.round(verbrauchte), id)
         .run();
       const assignees = await getTaskAssignees(env, id);
       const empfaenger = task.zustaendig_user_id || user.id;
