@@ -24,14 +24,16 @@
 // Bestehende Einzel-Zuweisungen (zustaendig_user_id) bleiben unangetastet und
 // werden beim nächsten Start/Zuweisen automatisch in die neue Tabelle übernommen.
 //
-// WICHTIG — Migration für erwartete Zeit / Countdown auf Aufgaben:
-//
-//   ALTER TABLE tasks ADD COLUMN erwartete_sekunden INTEGER NOT NULL DEFAULT 0;
-//   ALTER TABLE tasks ADD COLUMN verbrauchte_sekunden INTEGER NOT NULL DEFAULT 0;
-//
-// erwartete_sekunden: beim Anlegen optional gesetzte Zielzeit (aus erwartete_minuten * 60).
-// verbrauchte_sekunden: Summe aller bereits abgeschlossenen LAEUFT-Phasen (wird bei
-// Pause/Fertig fortgeschrieben); zusammen mit start_zeit ergibt sich der Live-Countdown.
+// HINWEIS — Erwartete Zeit / Countdown (Aufgaben & Stadion-Layer):
+// Braucht KEINE D1-Migration und KEINE neuen Spalten! Da keine echte D1-DB mit
+// Zusatzspalten "erwartete_sekunden" / "verbrauchte_sekunden" vorausgesetzt werden
+// kann, werden diese beiden Werte stattdessen als kleines JSON-Päckchen in ein
+// bereits vorhandenes Textfeld gepackt:
+//   - Aufgaben:      im Feld "notiz" (wird sonst im UI nicht angezeigt/benutzt)
+//   - Stadion-Layer:  im Feld "name", angehängt hinter einem unsichtbaren
+//                      Trennzeichen, sodass der eigentliche Layer-Name beim
+//                      Anzeigen sauber abgetrennt bleibt.
+// Siehe packZeitMeta() / unpackZeitMeta() weiter unten für die Details.
 
 // ---------- Hilfsfunktionen ----------
 
@@ -157,6 +159,31 @@ function badgeFor(std) {
   return { current: cur, next };
 }
 
+// ---------- Erwartete Zeit (Countdown) — Meta-Encoding ohne D1-Migration ----------
+// Statt neuer D1-Spalten wird ein kleines JSON-Objekt {erw, verb} hinter einem
+// unsichtbaren Marker an ein vorhandenes Textfeld angehängt. "erw" = erwartete
+// Sekunden (Zielzeit), "verb" = bereits verbrauchte Sekunden aus abgeschlossenen
+// LAEUFT-Phasen. Ist kein Zeit-Meta gesetzt, bleibt das Feld unverändert/sauber.
+const ZEIT_META_MARK = "\u2063ZM\u2063";
+
+function packZeitMeta(baseText, erwSek, verbSek) {
+  const base = baseText || "";
+  const erw = Math.max(0, Math.round(erwSek || 0));
+  const verb = Math.max(0, Math.round(verbSek || 0));
+  if (!erw && !verb) return base;
+  return `${base}${ZEIT_META_MARK}${JSON.stringify({ erw, verb })}`;
+}
+
+function unpackZeitMeta(text) {
+  const raw = text || "";
+  const idx = raw.indexOf(ZEIT_META_MARK);
+  if (idx === -1) return { base: raw, erw: 0, verb: 0 };
+  const base = raw.slice(0, idx);
+  let m = {};
+  try { m = JSON.parse(raw.slice(idx + ZEIT_META_MARK.length)); } catch { /* ignore */ }
+  return { base, erw: Math.max(0, parseInt(m.erw) || 0), verb: Math.max(0, parseInt(m.verb) || 0) };
+}
+
 async function totalHoursFor(env, gamertag) {
   const row = await env.DB.prepare(
     "SELECT COALESCE(SUM(dauer_std),0) AS h FROM sessions WHERE gamertag = ? AND status = 'OFF'"
@@ -256,15 +283,22 @@ async function isAssignedToLayer(env, layer, userId) {
   return ids.includes(userId);
 }
 
-// Hängt an eine Liste von Aufgaben/Layern die jeweilige assignees-Liste an.
+// Hängt an eine Liste von Aufgaben/Layern die jeweilige assignees-Liste sowie die
+// (aus dem Meta-Feld dekodierte) erwartete/verbrauchte Zeit an.
 async function attachTaskAssignees(env, tasks) {
   const out = [];
-  for (const t of tasks) out.push({ ...t, assignees: await getTaskAssignees(env, t.id) });
+  for (const t of tasks) {
+    const { erw, verb } = unpackZeitMeta(t.notiz);
+    out.push({ ...t, assignees: await getTaskAssignees(env, t.id), erwartete_sekunden: erw, verbrauchte_sekunden: verb });
+  }
   return out;
 }
 async function attachLayerAssignees(env, layers) {
   const out = [];
-  for (const l of layers) out.push({ ...l, assignees: await getLayerAssignees(env, l.id) });
+  for (const l of layers) {
+    const { base, erw, verb } = unpackZeitMeta(l.name);
+    out.push({ ...l, name: base, assignees: await getLayerAssignees(env, l.id), erwartete_sekunden: erw, verbrauchte_sekunden: verb });
+  }
   return out;
 }
 
@@ -641,7 +675,7 @@ export async function onRequest(context) {
     }
 
     if (path === "/tasks" && method === "POST") {
-      const { titel, notiz, prioritaet, zustaendig_user_id, zustaendig_user_ids, punkte } = body;
+      const { titel, prioritaet, zustaendig_user_id, zustaendig_user_ids, punkte } = body;
       if (!titel || !titel.trim()) return err("Aufgabentitel fehlt.");
 
       // Mehrfach-Zuweisung hat Vorrang, sonst Einzel-Feld für Rückwärtskompatibilität.
@@ -669,14 +703,16 @@ export async function onRequest(context) {
       // Nur der Admin darf festlegen, wie viele Punkte eine Aufgabe bringt.
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
       // Erwartete Zeit (Minuten) darf jeder beim Anlegen mitgeben — reine Schätzung,
-      // die im Frontend als Countdown ab dem Start runterzählt.
+      // die im Frontend als Countdown ab dem Start runterzählt. Wird OHNE eigene
+      // D1-Spalte im "notiz"-Feld mitgespeichert (siehe packZeitMeta oben).
       const erwSek = Math.max(0, parseInt(body.erwartete_minuten) || 0) * 60;
+      const notizWert = packZeitMeta("", erwSek, 0);
 
       const res = await env.DB.prepare(
-        `INSERT INTO tasks (titel, zustaendig_user_id, zustaendig_name, zugewiesen_von, status, prioritaet, notiz, erstellt_am, erstellt_von, punkte, erwartete_sekunden)
-         VALUES (?, ?, ?, ?, 'OFFEN', ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO tasks (titel, zustaendig_user_id, zustaendig_name, zugewiesen_von, status, prioritaet, notiz, erstellt_am, erstellt_von, punkte)
+         VALUES (?, ?, ?, ?, 'OFFEN', ?, ?, ?, ?, ?)`
       )
-        .bind(titel.trim(), zId, zName, zugewiesenVon, prioritaet || "NORMAL", notiz || "", nowIso(), user.id, pkt, erwSek)
+        .bind(titel.trim(), zId, zName, zugewiesenVon, prioritaet || "NORMAL", notizWert, nowIso(), user.id, pkt)
         .run();
 
       const newId = res.meta.last_row_id;
@@ -692,6 +728,46 @@ export async function onRequest(context) {
         );
       }
       return json({ id: newId });
+    }
+
+    // Admin/Berechtigte können eine Aufgabe jederzeit neu zuweisen — auch wenn
+    // bereits jemand zugewiesen ist oder sie freiwillig angenommen wurde.
+    const taskAssignMatch = path.match(/^\/tasks\/(\d+)\/zuweisen$/);
+    if (taskAssignMatch && method === "POST") {
+      if (!canAssign) return err("Keine Berechtigung.", 403);
+      const id = taskAssignMatch[1];
+      const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
+      if (!task) return err("Aufgabe nicht gefunden.", 404);
+      const { user_id, user_ids } = body;
+      let ids = Array.isArray(user_ids) ? user_ids.map((x) => Number(x)).filter(Boolean) : [];
+      if (!ids.length && user_id) ids = [Number(user_id)];
+      let zId = null, zName = null;
+      let assignedTargets = [];
+      if (ids.length) {
+        for (const uid of ids) {
+          const target = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(uid).first();
+          if (!target) return err("Spieler nicht gefunden.", 404);
+          assignedTargets.push(target);
+        }
+        zId = assignedTargets[0].id;
+        zName = assignedTargets.length > 1
+          ? assignedTargets.map((t) => `${t.vorname} ${t.nachname}`).join(" / ")
+          : `${assignedTargets[0].vorname} ${assignedTargets[0].nachname}`;
+      }
+      await env.DB.prepare("UPDATE tasks SET zustaendig_user_id = ?, zustaendig_name = ?, zugewiesen_von = ? WHERE id = ?")
+        .bind(zId, zName, user.id, id).run();
+      await setTaskAssignees(env, id, assignedTargets.map((t) => t.id));
+      if (assignedTargets.length) {
+        await notifyMany(
+          env,
+          assignedTargets.map((t) => t.id),
+          "AUFGABE_ZUGEWIESEN",
+          "Aufgabe neu zugewiesen",
+          `${meName} hat dir die Aufgabe „${task.titel}" zugewiesen.`,
+          "aufgaben"
+        );
+      }
+      return json({ ok: true });
     }
 
     // Offene Aufgabe (egal ob unzugewiesen oder jemand anderem zugewiesen) freiwillig
@@ -752,11 +828,14 @@ export async function onRequest(context) {
       if (task.status !== "LAEUFT") return err("Nur laufende Aufgaben können pausiert werden.");
       if (!(await isAssignedToTask(env, task, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
       // Gelaufene Zeit seit dem letzten Start/Weiter aufsummieren, damit der Countdown
-      // beim Pausieren exakt einfriert und beim Fortsetzen dort weiterläuft.
+      // beim Pausieren exakt einfriert und beim Fortsetzen dort weiterläuft. Erwartete/
+      // verbrauchte Zeit steckt als Meta im "notiz"-Feld (kein D1-Schema nötig).
+      const { erw, verb } = unpackZeitMeta(task.notiz);
       const zusatz = task.start_zeit ? Math.max(0, (Date.now() - new Date(task.start_zeit).getTime()) / 1000) : 0;
-      const neueVerbrauchteSekunden = Math.round((task.verbrauchte_sekunden || 0) + zusatz);
-      await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT', verbrauchte_sekunden = ? WHERE id = ?")
-        .bind(neueVerbrauchteSekunden, id)
+      const neuerVerb = Math.round(verb + zusatz);
+      const neueNotiz = packZeitMeta("", erw, neuerVerb);
+      await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT', notiz = ? WHERE id = ?")
+        .bind(neueNotiz, id)
         .run();
       return json({ ok: true });
     }
@@ -782,12 +861,14 @@ export async function onRequest(context) {
       if (!(await isAssignedToTask(env, task, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
       // Falls die Aufgabe noch lief (nicht über Pause abgeschlossen), die letzte
       // laufende Phase noch mit in die verbrauchte Zeit einrechnen.
-      let verbrauchte = task.verbrauchte_sekunden || 0;
+      const { erw, verb } = unpackZeitMeta(task.notiz);
+      let verbrauchte = verb;
       if (task.status === "LAEUFT" && task.start_zeit) {
         verbrauchte += Math.max(0, (Date.now() - new Date(task.start_zeit).getTime()) / 1000);
       }
-      await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ?, verbrauchte_sekunden = ? WHERE id = ?")
-        .bind(nowIso(), Math.round(verbrauchte), id)
+      const neueNotiz = packZeitMeta("", erw, Math.round(verbrauchte));
+      await env.DB.prepare("UPDATE tasks SET status = 'ERLEDIGT', end_zeit = ?, notiz = ? WHERE id = ?")
+        .bind(nowIso(), neueNotiz, id)
         .run();
       const assignees = await getTaskAssignees(env, id);
       const empfaenger = task.zustaendig_user_id || user.id;
@@ -931,12 +1012,16 @@ export async function onRequest(context) {
         zugewiesenVon = user.id;
       }
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
+      // Erwartete Zeit (Minuten) — wie bei Aufgaben ohne D1-Schemaänderung als
+      // Meta hinter dem Layer-Namen mitgespeichert (siehe packZeitMeta oben).
+      const erwSek = Math.max(0, parseInt(body.erwartete_minuten) || 0) * 60;
+      const nameWert = packZeitMeta(name.trim(), erwSek, 0);
 
       const res = await env.DB.prepare(
         `INSERT INTO stadium_layers (layer_nr, name, status, zustaendig_user_id, zustaendig_name, zugewiesen_von, punkte, erstellt_am, erstellt_von)
          VALUES (?, ?, 'OFFEN', ?, ?, ?, ?, ?, ?)`
       )
-        .bind(nr, name.trim(), zId, zName, zugewiesenVon, pkt, nowIso(), user.id)
+        .bind(nr, nameWert, zId, zName, zugewiesenVon, pkt, nowIso(), user.id)
         .run();
 
       const newId = res.meta.last_row_id;
@@ -954,12 +1039,15 @@ export async function onRequest(context) {
       return json({ id: newId, layer_nr: nr });
     }
 
+    // Admin/Berechtigte können eine Layer jederzeit neu zuweisen — auch wenn
+    // bereits jemand zugewiesen ist.
     const layerAssignMatch = path.match(/^\/stadion\/layers\/(\d+)\/zuweisen$/);
     if (layerAssignMatch && method === "POST") {
       if (!canAssign) return err("Keine Berechtigung.", 403);
       const id = layerAssignMatch[1];
       const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
       if (!layer) return err("Layer nicht gefunden.", 404);
+      const { base: layerBaseName } = unpackZeitMeta(layer.name);
       const { user_id, user_ids } = body;
       let ids = Array.isArray(user_ids) ? user_ids.map((x) => Number(x)).filter(Boolean) : [];
       if (!ids.length && user_id) ids = [Number(user_id)];
@@ -980,7 +1068,7 @@ export async function onRequest(context) {
         .bind(zId, zName, user.id, id).run();
       await setLayerAssignees(env, id, assignedTargets.map((t) => t.id));
       if (assignedTargets.length) {
-        await notifyMany(env, assignedTargets.map((t) => t.id), "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${layer.name}" zugewiesen.`, "stadion");
+        await notifyMany(env, assignedTargets.map((t) => t.id), "LAYER_ZUGEWIESEN", "Stadion-Layer zugewiesen", `${meName} hat dir die Layer „${layerBaseName}" zugewiesen.`, "stadion");
       }
       return json({ ok: true });
     }
@@ -1006,7 +1094,13 @@ export async function onRequest(context) {
       if (!layer) return err("Layer nicht gefunden.", 404);
       if (layer.status !== "LAEUFT") return err("Nur laufende Layer können pausiert werden.");
       if (!(await isAssignedToLayer(env, layer, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("UPDATE stadium_layers SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
+      // Erwartete/verbrauchte Zeit steckt als Meta im "name"-Feld (kein D1-Schema
+      // nötig) — beim Pausieren die gelaufene Zeit seit Start dazuzählen und einfrieren.
+      const { base, erw, verb } = unpackZeitMeta(layer.name);
+      const zusatz = layer.start_zeit ? Math.max(0, (Date.now() - new Date(layer.start_zeit).getTime()) / 1000) : 0;
+      const neuerVerb = Math.round(verb + zusatz);
+      const neuerName = packZeitMeta(base, erw, neuerVerb);
+      await env.DB.prepare("UPDATE stadium_layers SET status = 'PAUSIERT', name = ? WHERE id = ?").bind(neuerName, id).run();
       return json({ ok: true });
     }
 
@@ -1027,7 +1121,13 @@ export async function onRequest(context) {
       const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
       if (!layer) return err("Layer nicht gefunden.", 404);
       if (!(await isAssignedToLayer(env, layer, user.id)) && !canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("UPDATE stadium_layers SET status = 'FERTIG', end_zeit = ? WHERE id = ?").bind(nowIso(), id).run();
+      const { base, erw, verb } = unpackZeitMeta(layer.name);
+      let verbrauchte = verb;
+      if (layer.status === "LAEUFT" && layer.start_zeit) {
+        verbrauchte += Math.max(0, (Date.now() - new Date(layer.start_zeit).getTime()) / 1000);
+      }
+      const neuerName = packZeitMeta(base, erw, Math.round(verbrauchte));
+      await env.DB.prepare("UPDATE stadium_layers SET status = 'FERTIG', end_zeit = ?, name = ? WHERE id = ?").bind(nowIso(), neuerName, id).run();
       const assignees = await getLayerAssignees(env, id);
       const empfaenger = layer.zustaendig_user_id || user.id;
       await verteilePunkte(env, layer.punkte, assignees, empfaenger);
@@ -1036,7 +1136,7 @@ export async function onRequest(context) {
         [layer.zugewiesen_von].filter((x) => x && x !== user.id),
         "LAYER_FERTIG",
         "Stadion-Layer fertiggestellt",
-        `${meName} hat die Layer „${layer.name}" fertiggestellt. Das Stadion wächst! 🏟️`,
+        `${meName} hat die Layer „${base}" fertiggestellt. Das Stadion wächst! 🏟️`,
         "stadion"
       );
       return json({ ok: true });
