@@ -7,8 +7,9 @@
 // layer_zuweisungen) für Mehrfach-Zuweisung. Das ist jetzt entfernt, weil
 // keine D1-Migration vorausgesetzt werden kann. Stattdessen wird alles
 // (erwartete/verbrauchte Zeit, Liste der zugewiesenen Spieler-IDs, ein
-// optionaler Link UND die Verknüpfung zu einem Litematica-Block-Layer)
-// als kleines JSON-Päckchen in ein bereits vorhandenes Textfeld gepackt:
+// optionaler Link, die Verknüpfung zu einem Litematica-Block-Layer UND
+// jetzt auch der geplante Termin — Datum + Uhrzeit) als kleines
+// JSON-Päckchen in ein bereits vorhandenes Textfeld gepackt:
 //   - Aufgaben:      im Feld "notiz" (wird sonst im UI nicht angezeigt/benutzt)
 //   - Stadion-Layer:  im Feld "name", angehängt hinter einem unsichtbaren
 //                      Trennzeichen, sodass der eigentliche Layer-Name beim
@@ -25,6 +26,12 @@
 //     werden (Materialliste aus dem Bauplan). Die Blockdaten selbst liegen
 //     NICHT in D1, sondern als statisches Datenmodul "block-layers-data.js"
 //     (siehe eigene Datei) — einfach neben diese Datei legen und importieren.
+//   - Aufgaben UND Stadion-Layer können jetzt einen geplanten Termin
+//     bekommen (Datum + Uhrzeit, z. B. "28.06.2026 16:00 Uhr"). Wird als
+//     "datum" (YYYY-MM-DD) und "zeit" (HH:MM) im selben Meta-Päckchen
+//     gespeichert wie die erwartete Dauer. Der "Zeitstrahl"-Tab im Frontend
+//     nutzt datum + zeit + die bereits vorhandene erwartete Dauer, um einen
+//     24-Stunden-Tagesplan zu zeichnen.
 
 import { BLOCK_LAYERS } from "./block-layers-data.js";
 
@@ -153,14 +160,16 @@ function badgeFor(std) {
 }
 
 // ---------- Meta-Encoding ohne D1-Migration ----------
-// Ein kleines JSON-Objekt {erw, verb, ids, link, blk} wird hinter einem
-// unsichtbaren Marker an ein vorhandenes Textfeld angehängt.
-//   erw  = erwartete Sekunden (Zielzeit für den Countdown)
-//   verb = bereits verbrauchte Sekunden aus abgeschlossenen LAEUFT-Phasen
-//   ids  = Liste der User-IDs, die aktuell zugewiesen sind (Mehrfach-Zuweisung)
-//   link = optionaler Link (z. B. Bauplan/Video) — nur bei Aufgaben genutzt
-//   blk  = Nummer des verknüpften Litematica-Block-Layers — nur bei
-//          Stadion-Layern genutzt (0 = keine Verknüpfung)
+// Ein kleines JSON-Objekt {erw, verb, ids, link, blk, datum, zeit} wird
+// hinter einem unsichtbaren Marker an ein vorhandenes Textfeld angehängt.
+//   erw   = erwartete Sekunden (Zielzeit für den Countdown / Dauer im Zeitstrahl)
+//   verb  = bereits verbrauchte Sekunden aus abgeschlossenen LAEUFT-Phasen
+//   ids   = Liste der User-IDs, die aktuell zugewiesen sind (Mehrfach-Zuweisung)
+//   link  = optionaler Link (z. B. Bauplan/Video) — nur bei Aufgaben genutzt
+//   blk   = Nummer des verknüpften Litematica-Block-Layers — nur bei
+//           Stadion-Layern genutzt (0 = keine Verknüpfung)
+//   datum = geplantes Datum im Format YYYY-MM-DD ("" = kein Termin geplant)
+//   zeit  = geplante Uhrzeit im Format HH:MM ("" = keine Uhrzeit gesetzt)
 // Ist gar nichts davon gesetzt, bleibt das Feld unverändert/sauber.
 const META_MARK = "\u2063ZM\u2063";
 
@@ -171,14 +180,16 @@ function packMeta(baseText, meta) {
   const ids = Array.isArray(meta && meta.ids) ? [...new Set(meta.ids.map(Number).filter(Boolean))] : [];
   const link = meta && meta.link ? String(meta.link).trim().slice(0, 500) : "";
   const blk = Math.max(0, Math.round((meta && meta.blk) || 0));
-  if (!erw && !verb && !ids.length && !link && !blk) return base;
-  return `${base}${META_MARK}${JSON.stringify({ erw, verb, ids, link, blk })}`;
+  const datum = meta && meta.datum ? String(meta.datum).trim().slice(0, 10) : "";
+  const zeit = meta && meta.zeit ? String(meta.zeit).trim().slice(0, 5) : "";
+  if (!erw && !verb && !ids.length && !link && !blk && !datum && !zeit) return base;
+  return `${base}${META_MARK}${JSON.stringify({ erw, verb, ids, link, blk, datum, zeit })}`;
 }
 
 function unpackMeta(text) {
   const raw = text || "";
   const idx = raw.indexOf(META_MARK);
-  if (idx === -1) return { base: raw, erw: 0, verb: 0, ids: [], link: "", blk: 0 };
+  if (idx === -1) return { base: raw, erw: 0, verb: 0, ids: [], link: "", blk: 0, datum: "", zeit: "" };
   const base = raw.slice(0, idx);
   let m = {};
   try { m = JSON.parse(raw.slice(idx + META_MARK.length)); } catch { /* ignore */ }
@@ -189,6 +200,8 @@ function unpackMeta(text) {
     ids: Array.isArray(m.ids) ? m.ids.map(Number).filter(Boolean) : [],
     link: typeof m.link === "string" ? m.link.slice(0, 500) : "",
     blk: Math.max(0, parseInt(m.blk) || 0),
+    datum: typeof m.datum === "string" ? m.datum.slice(0, 10) : "",
+    zeit: typeof m.zeit === "string" ? m.zeit.slice(0, 5) : "",
   };
 }
 
@@ -265,6 +278,8 @@ async function setTaskMeta(env, taskId, patch) {
     verb: patch.verb !== undefined ? patch.verb : cur.verb,
     ids: patch.ids !== undefined ? patch.ids : cur.ids,
     link: patch.link !== undefined ? patch.link : cur.link,
+    datum: patch.datum !== undefined ? patch.datum : cur.datum,
+    zeit: patch.zeit !== undefined ? patch.zeit : cur.zeit,
   };
   const notiz = packMeta("", merged);
   await env.DB.prepare("UPDATE tasks SET notiz = ? WHERE id = ?").bind(notiz, taskId).run();
@@ -303,6 +318,8 @@ async function setLayerMeta(env, layerId, patch) {
     verb: patch.verb !== undefined ? patch.verb : cur.verb,
     ids: patch.ids !== undefined ? patch.ids : cur.ids,
     blk: patch.blk !== undefined ? patch.blk : cur.blk,
+    datum: patch.datum !== undefined ? patch.datum : cur.datum,
+    zeit: patch.zeit !== undefined ? patch.zeit : cur.zeit,
   };
   const name = packMeta(merged.base, merged);
   await env.DB.prepare("UPDATE stadium_layers SET name = ? WHERE id = ?").bind(name, layerId).run();
@@ -327,18 +344,21 @@ async function isAssignedToLayer(env, layer, userId) {
 }
 
 // Hängt an eine Liste von Aufgaben/Layern die jeweilige assignees-Liste sowie die
-// (aus dem Meta-Feld dekodierte) erwartete/verbrauchte Zeit, den Link (Aufgaben)
-// bzw. die verknüpfte Block-Layer-Nummer (Stadion-Layer) an.
+// (aus dem Meta-Feld dekodierte) erwartete/verbrauchte Zeit, den Link (Aufgaben),
+// die verknüpfte Block-Layer-Nummer (Stadion-Layer) UND den geplanten Termin
+// (Datum + Uhrzeit) an.
 async function attachTaskAssignees(env, tasks) {
   const out = [];
   for (const t of tasks) {
-    const { erw, verb, ids, link } = unpackMeta(t.notiz);
+    const { erw, verb, ids, link, datum, zeit } = unpackMeta(t.notiz);
     out.push({
       ...t,
       assignees: await getUsersByIds(env, ids),
       erwartete_sekunden: erw,
       verbrauchte_sekunden: verb,
       link: link || "",
+      geplant_datum: datum || "",
+      geplant_zeit: zeit || "",
     });
   }
   return out;
@@ -346,7 +366,7 @@ async function attachTaskAssignees(env, tasks) {
 async function attachLayerAssignees(env, layers) {
   const out = [];
   for (const l of layers) {
-    const { base, erw, verb, ids, blk } = unpackMeta(l.name);
+    const { base, erw, verb, ids, blk, datum, zeit } = unpackMeta(l.name);
     out.push({
       ...l,
       name: base,
@@ -354,6 +374,8 @@ async function attachLayerAssignees(env, layers) {
       erwartete_sekunden: erw,
       verbrauchte_sekunden: verb,
       blocklayer_nr: blk || 0,
+      geplant_datum: datum || "",
+      geplant_zeit: zeit || "",
     });
   }
   return out;
@@ -424,6 +446,22 @@ function sanitizeLink(raw) {
   } catch {
     return "";
   }
+}
+
+// Prüft ein vom Nutzer eingegebenes Termin-Datum (erwartetes Format: YYYY-MM-DD,
+// wie es <input type="date"> liefert). Ungültige/leere Eingaben werden zu "".
+function sanitizeDatum(raw) {
+  const val = (raw || "").toString().trim();
+  if (!val) return "";
+  return /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : "";
+}
+
+// Prüft eine vom Nutzer eingegebene Termin-Uhrzeit (erwartetes Format: HH:MM,
+// wie es <input type="time"> liefert). Ungültige/leere Eingaben werden zu "".
+function sanitizeZeit(raw) {
+  const val = (raw || "").toString().trim();
+  if (!val) return "";
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(val) ? val : "";
 }
 
 // ---------- Router ----------
@@ -743,8 +781,11 @@ export async function onRequest(context) {
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
       const erwSek = Math.max(0, parseInt(body.erwartete_minuten) || 0) * 60;
       const linkWert = sanitizeLink(link);
-      // Erwartete Zeit, Zuweisungs-IDs UND Link direkt in einem Schritt ins "notiz"-Feld packen.
-      const notizWert = packMeta("", { erw: erwSek, verb: 0, ids: assignedTargets.map((t) => t.id), link: linkWert });
+      const datumWert = sanitizeDatum(body.datum);
+      const zeitWert = sanitizeZeit(body.zeit);
+      // Erwartete Zeit, Zuweisungs-IDs, Link UND geplanter Termin direkt in einem
+      // Schritt ins "notiz"-Feld packen.
+      const notizWert = packMeta("", { erw: erwSek, verb: 0, ids: assignedTargets.map((t) => t.id), link: linkWert, datum: datumWert, zeit: zeitWert });
 
       const res = await env.DB.prepare(
         `INSERT INTO tasks (titel, zustaendig_user_id, zustaendig_name, zugewiesen_von, status, prioritaet, notiz, erstellt_am, erstellt_von, punkte)
@@ -769,7 +810,8 @@ export async function onRequest(context) {
 
     // Admin/Berechtigte können eine Aufgabe JEDERZEIT neu zuweisen — auch wenn
     // bereits jemand zugewiesen ist oder sie freiwillig angenommen wurde. Die
-    // erwartete/verbrauchte Zeit UND der Link im Meta-Feld bleiben dabei unangetastet erhalten.
+    // erwartete/verbrauchte Zeit, der Link UND der geplante Termin im Meta-Feld
+    // bleiben dabei unangetastet erhalten.
     const taskAssignMatch = path.match(/^\/tasks\/(\d+)\/zuweisen$/);
     if (taskAssignMatch && method === "POST") {
       if (!canAssign) return err("Keine Berechtigung.", 403);
@@ -818,6 +860,20 @@ export async function onRequest(context) {
       const linkWert = sanitizeLink(body.link);
       await setTaskMeta(env, id, { link: linkWert });
       return json({ ok: true, link: linkWert });
+    }
+
+    // Admin/Berechtigte können den geplanten Termin (Datum + Uhrzeit) einer
+    // Aufgabe nachträglich ändern/entfernen — z. B. direkt aus dem Zeitstrahl heraus.
+    const taskTerminMatch = path.match(/^\/tasks\/(\d+)\/termin$/);
+    if (taskTerminMatch && method === "POST") {
+      if (!canAssign) return err("Keine Berechtigung.", 403);
+      const id = taskTerminMatch[1];
+      const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
+      if (!task) return err("Aufgabe nicht gefunden.", 404);
+      const datumWert = sanitizeDatum(body.datum);
+      const zeitWert = sanitizeZeit(body.zeit);
+      await setTaskMeta(env, id, { datum: datumWert, zeit: zeitWert });
+      return json({ ok: true, datum: datumWert, zeit: zeitWert });
     }
 
     const taskAcceptMatch = path.match(/^\/tasks\/(\d+)\/annehmen$/);
@@ -877,7 +933,7 @@ export async function onRequest(context) {
       const { verb } = unpackMeta(task.notiz);
       const zusatz = task.start_zeit ? Math.max(0, (Date.now() - new Date(task.start_zeit).getTime()) / 1000) : 0;
       const neuerVerb = Math.round(verb + zusatz);
-      // setTaskMeta lässt "erw", "ids" und "link" unangetastet, ändert nur "verb".
+      // setTaskMeta lässt "erw", "ids", "link" und "datum"/"zeit" unangetastet, ändert nur "verb".
       await setTaskMeta(env, id, { verb: neuerVerb });
       await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
@@ -1053,12 +1109,14 @@ export async function onRequest(context) {
       }
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
       const erwSek = Math.max(0, parseInt(body.erwartete_minuten) || 0) * 60;
+      const datumWert = sanitizeDatum(body.datum);
+      const zeitWert = sanitizeZeit(body.zeit);
       // Gültigkeit der Block-Layer-Nummer prüfen (muss in BLOCK_LAYERS existieren).
       const blkWunsch = Math.max(0, parseInt(blocklayer_nr) || 0);
       const blk = blkWunsch && BLOCK_LAYERS.some((bl) => bl.nr === blkWunsch) ? blkWunsch : 0;
-      // Erwartete Zeit, Zuweisungs-IDs UND Block-Layer-Verknüpfung direkt in einem
-      // Schritt hinter den Layer-Namen packen.
-      const nameWert = packMeta(name.trim(), { erw: erwSek, verb: 0, ids: assignedTargets.map((t) => t.id), blk });
+      // Erwartete Zeit, Zuweisungs-IDs, Block-Layer-Verknüpfung UND geplanter
+      // Termin direkt in einem Schritt hinter den Layer-Namen packen.
+      const nameWert = packMeta(name.trim(), { erw: erwSek, verb: 0, ids: assignedTargets.map((t) => t.id), blk, datum: datumWert, zeit: zeitWert });
 
       const res = await env.DB.prepare(
         `INSERT INTO stadium_layers (layer_nr, name, status, zustaendig_user_id, zustaendig_name, zugewiesen_von, punkte, erstellt_am, erstellt_von)
@@ -1082,8 +1140,8 @@ export async function onRequest(context) {
     }
 
     // Admin/Berechtigte können eine Layer JEDERZEIT neu zuweisen — auch wenn
-    // bereits jemand zugewiesen ist. Erwartete/verbrauchte Zeit und die
-    // Block-Layer-Verknüpfung bleiben erhalten.
+    // bereits jemand zugewiesen ist. Erwartete/verbrauchte Zeit, die
+    // Block-Layer-Verknüpfung UND der geplante Termin bleiben erhalten.
     const layerAssignMatch = path.match(/^\/stadion\/layers\/(\d+)\/zuweisen$/);
     if (layerAssignMatch && method === "POST") {
       if (!canAssign) return err("Keine Berechtigung.", 403);
@@ -1130,6 +1188,20 @@ export async function onRequest(context) {
       return json({ ok: true, blocklayer_nr: blk });
     }
 
+    // Admin/Berechtigte können den geplanten Termin (Datum + Uhrzeit) einer
+    // Stadion-Layer nachträglich ändern/entfernen — z. B. direkt aus dem Zeitstrahl heraus.
+    const layerTerminMatch = path.match(/^\/stadion\/layers\/(\d+)\/termin$/);
+    if (layerTerminMatch && method === "POST") {
+      if (!canAssign) return err("Keine Berechtigung.", 403);
+      const id = layerTerminMatch[1];
+      const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
+      if (!layer) return err("Layer nicht gefunden.", 404);
+      const datumWert = sanitizeDatum(body.datum);
+      const zeitWert = sanitizeZeit(body.zeit);
+      await setLayerMeta(env, id, { datum: datumWert, zeit: zeitWert });
+      return json({ ok: true, datum: datumWert, zeit: zeitWert });
+    }
+
     const layerStartMatch = path.match(/^\/stadion\/layers\/(\d+)\/start$/);
     if (layerStartMatch && method === "POST") {
       const id = layerStartMatch[1];
@@ -1154,7 +1226,7 @@ export async function onRequest(context) {
       const { verb } = unpackMeta(layer.name);
       const zusatz = layer.start_zeit ? Math.max(0, (Date.now() - new Date(layer.start_zeit).getTime()) / 1000) : 0;
       const neuerVerb = Math.round(verb + zusatz);
-      // setLayerMeta lässt "base" (Layer-Name), "erw", "ids" und "blk" unangetastet, ändert nur "verb".
+      // setLayerMeta lässt "base" (Layer-Name), "erw", "ids", "blk" und "datum"/"zeit" unangetastet, ändert nur "verb".
       await setLayerMeta(env, id, { verb: neuerVerb });
       await env.DB.prepare("UPDATE stadium_layers SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
