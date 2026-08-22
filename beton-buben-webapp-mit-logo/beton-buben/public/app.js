@@ -241,7 +241,7 @@ function zeitEingabeHtml() {
 }
 
 // Eingabefeld für den geplanten Termin (Datum + Uhrzeit) einer Aufgabe/Layer.
-// Getrennt von der "Erwartete Zeit" oben — das ist die DAUER, das hier ist
+// Getrennt von der "Erwarteten Zeit" oben — das ist die DAUER, das hier ist
 // WANN es losgehen soll. Wird beim Anlegen mitgeschickt und erscheint dann
 // im "Zeitstrahl"-Tab als Balken im 24-Stunden-Überblick.
 function terminEingabeHtml() {
@@ -813,13 +813,20 @@ async function renderDashboard() {
   state.me = me;
   applyTabVisibility();
   document.getElementById("whoAvatar").innerHTML = avatarHtml(me.avatar, 26);
-  const [{ tasks }, { layers }, schematic] = await Promise.all([api("/tasks"), api("/stadion/layers"), api("/schematic")]);
+  const [{ tasks }, { layers }, schematic, { eintraege }] = await Promise.all([
+    api("/tasks"),
+    api("/stadion/layers"),
+    api("/schematic"),
+    api("/kalender"),
+  ]);
   const overviewUsers = [];
   const meineAufgaben = tasks.filter((t) => (t.zustaendig_user_id === me.id || (t.assignees || []).some((a) => a.id === me.id)) && t.status !== "ERLEDIGT").slice(0, 4);
   const meineLayer = layers.filter((l) => (l.zustaendig_user_id === me.id || (l.assignees || []).some((a) => a.id === me.id)) && l.status !== "FERTIG").slice(0, 4);
   const fertigeLayer = layers.filter((l) => l.status === "FERTIG").length;
   const layerGesamt = layers.length;
   const layerProzent = layerGesamt ? Math.round((fertigeLayer / layerGesamt) * 100) : 0;
+  const heutigDatum = todayStrLocal();
+  const heutigeItems = buildZeitstrahlItems(tasks, layers, eintraege, heutigDatum);
 
   $app.innerHTML = `
     <h1>Willkommen, ${escapeHtml(me.vorname)}</h1>
@@ -838,6 +845,15 @@ async function renderDashboard() {
         <div class="power-readout" id="liveClock">${me.online ? fmtClock(Date.now() - new Date(me.online_seit)) : "00:00:00"}</div>
         <div class="power-caption">${me.online ? "läuft seit " + fmtDate(me.online_seit) : "Klicke zum Starten"}</div>
       </div>
+    </div>
+
+    <div class="panel">
+      <div class="toolbar" style="margin-bottom:2px;">
+        <h2 style="margin:0;">🕒 Heutiger Zeitstrahl</h2>
+        <button type="button" class="btn small secondary" data-goto-zeitstrahl>Ganzer Zeitstrahl ▶</button>
+      </div>
+      <div class="subtitle" style="margin:6px 0 0;">${fmtDatumKurz(heutigDatum)}</div>
+      ${zeitstrahlTimelineHtml(heutigeItems, true)}
     </div>
 
     ${schematicPanelHtml(schematic, me.is_admin)}
@@ -929,6 +945,12 @@ async function renderDashboard() {
     render();
   });
 
+  document.querySelectorAll("[data-goto-zeitstrahl]").forEach((b) => b.onclick = () => {
+    state.zeitstrahlDatum = heutigDatum;
+    state.view = "zeitstrahl";
+    render();
+  });
+
   // Aufgaben direkt aus der Übersicht starten/pausieren/fortsetzen/abschließen
   document.querySelectorAll("[data-start]").forEach((b) => b.onclick = async () => {
     try { await api(`/tasks/${b.dataset.start}/start`, { method: "POST" }); renderDashboard(); }
@@ -978,6 +1000,16 @@ async function renderDashboard() {
 
   // Live-Timer neben laufenden Aufgaben/Layern (⏱ läuft seit Start)
   startWorkTimerTicker();
+
+  // Läuft gerade ein Termin im heutigen Zeitstrahl-Mini-Panel, wird das
+  // Dashboard alle 20 Sekunden neu geladen, damit überzogene Balken live
+  // weiterwachsen (analog zum vollen Zeitstrahl-Tab).
+  const hatLaufende = heutigeItems.some((it) => it.status === "LAEUFT");
+  if (hatLaufende) {
+    state.zeitstrahlHandle = setInterval(() => {
+      if (state.view === "dashboard") renderDashboard();
+    }, 20000);
+  }
 }
 
 document.querySelectorAll("[data-dashboard-task]").forEach((el) => el.onclick = () => { state.view = "aufgaben"; render(); });
@@ -1433,13 +1465,11 @@ function blockLayerCardHtml(l, isFocus) {
 // angezeigt — in einer eigenen Farbe, damit sie sich von Aufgaben/Layern
 // abheben.
 
-async function renderZeitstrahl() {
-  if (state.zeitstrahlHandle) clearInterval(state.zeitstrahlHandle);
-  $app.innerHTML = `<div class="empty">Lade Zeitstrahl …</div>`;
-  if (!state.zeitstrahlDatum) state.zeitstrahlDatum = todayStrLocal();
-  const datum = state.zeitstrahlDatum;
-  const [{ tasks }, { layers }, { eintraege }] = await Promise.all([api("/tasks"), api("/stadion/layers"), api("/kalender")]);
-
+// Baut aus Aufgaben, Stadion-Layern und Kalender-Einträgen die Liste der
+// Zeitstrahl-Einträge für ein bestimmtes Datum. Wird sowohl vom vollen
+// Zeitstrahl-Tab als auch vom kompakten "Heutiger Zeitstrahl"-Panel auf dem
+// Dashboard genutzt, damit beide exakt dieselbe Logik verwenden.
+function buildZeitstrahlItems(tasks, layers, eintraege, datum) {
   const items = [];
   tasks.forEach((t) => {
     if (t.geplant_datum === datum && t.geplant_zeit) {
@@ -1474,6 +1504,17 @@ async function renderZeitstrahl() {
       });
     }
   });
+  return items;
+}
+
+async function renderZeitstrahl() {
+  if (state.zeitstrahlHandle) clearInterval(state.zeitstrahlHandle);
+  $app.innerHTML = `<div class="empty">Lade Zeitstrahl …</div>`;
+  if (!state.zeitstrahlDatum) state.zeitstrahlDatum = todayStrLocal();
+  const datum = state.zeitstrahlDatum;
+  const [{ tasks }, { layers }, { eintraege }] = await Promise.all([api("/tasks"), api("/stadion/layers"), api("/kalender")]);
+
+  const items = buildZeitstrahlItems(tasks, layers, eintraege, datum);
 
   const istHeute = datum === todayStrLocal();
 
@@ -1939,23 +1980,78 @@ function vorschlagItemHtml(v, isAdmin) {
 }
 
 // ---------- Plan für die ersten drei Tage ----------
-// Ersetzt den bisherigen PDF-Download auf der Startseite. Der Inhalt fehlt noch
-// (die PDF-Datei selbst liegt Claude nicht vor) — sobald der Text/die Datei
-// bereitgestellt wird, kommt er hier schön formatiert (Tag für Tag) rein.
+// Der Text ist im Backend hinterlegt (Endpunkt /plan3tage) und kann von
+// Admins direkt hier im Tab bearbeitet und gespeichert werden — es muss
+// also niemand mehr eine PDF verschicken. Einfache Text-Formatierung:
+//   # Titel         → große grüne Überschrift
+//   ## Tag-Titel    → Tages-Überschrift (rot)
+//   @ Zeitmarke     → zentrierte Zeitangabe (z. B. "Ungefähr 20:00")
+//   > Hinweis/Pause → hervorgehobener Hinweis (z. B. Pausen)
+//   ! Wichtig       → auffällige Warnung/Erinnerung (z. B. Wecker)
+//   Leerzeile       → zusätzlicher Abstand
+//   alles andere    → normale Zeile/Aufgabe
 
-function renderPlan3Tage() {
+// Wandelt den rohen Plan-Text (siehe Formatierungs-Legende oben) in schön
+// formatiertes HTML um.
+function renderPlanTextHtml(text) {
+  const lines = (text || "").split("\n");
+  let html = "";
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, "");
+    if (!line.trim()) { html += `<div class="plan-space"></div>`; continue; }
+    if (line.startsWith("# ")) { html += `<h1 class="plan-title">${escapeHtml(line.slice(2).trim())}</h1>`; continue; }
+    if (line.startsWith("## ")) { html += `<h2 class="plan-day">${escapeHtml(line.slice(3).trim())}</h2>`; continue; }
+    if (line.startsWith("@ ")) { html += `<div class="plan-time">${escapeHtml(line.slice(2).trim())}</div>`; continue; }
+    if (line.startsWith("> ")) { html += `<div class="plan-note">${escapeHtml(line.slice(2).trim())}</div>`; continue; }
+    if (line.startsWith("! ")) { html += `<div class="plan-alert">${escapeHtml(line.slice(2).trim())}</div>`; continue; }
+    html += `<p class="plan-line">${escapeHtml(line)}</p>`;
+  }
+  return html;
+}
+
+async function renderPlan3Tage() {
+  $app.innerHTML = `<div class="empty">Lade Plan …</div>`;
+  const data = await api("/plan3tage");
+  const isAdmin = state.me.is_admin;
+
   $app.innerHTML = `
     <h1>📋 Plan für die ersten drei Tage</h1>
-    <div class="subtitle">Der Ablaufplan für den Baustart — statt als PDF jetzt direkt hier zum Nachlesen.</div>
+    <div class="subtitle">Der Ablaufplan für den Baustart — direkt hier zum Nachlesen.${data.aktualisiert_am ? ` Zuletzt geändert von ${escapeHtml(data.aktualisiert_von || "?")} am ${fmtDate(data.aktualisiert_am)}.` : ""}</div>
 
-    <div class="panel kodex-panel">
-      <div class="empty">
-        Hier fehlt noch der Inhalt! Schick mir den Text (oder Screenshots/die Datei) von
-        „Buildattack_02_Plan.pdf", dann baue ich daraus eine schön formatierte
-        Tag-für-Tag-Übersicht an dieser Stelle.
+    ${isAdmin ? `
+    <div class="panel">
+      <button type="button" class="btn small secondary" id="planEditToggle">✏️ Text bearbeiten</button>
+      <div id="planEditBox" hidden style="margin-top:14px;">
+        <textarea id="planEditArea" class="select-dark" style="width:100%;min-height:360px;font-family:monospace;font-size:.92em;line-height:1.5;">${escapeHtml(data.text)}</textarea>
+        <div class="subtitle" style="margin:10px 0;">Formatierung: <code># Titel</code> (große Überschrift) · <code>## Tag</code> (Tages-Überschrift) · <code>@ Zeitmarke</code> · <code>&gt; Hinweis/Pause</code> · <code>! Wichtig</code> · Leerzeile = Abstand. Alles andere wird als normale Zeile angezeigt.</div>
+        <button type="button" class="btn small" id="planSaveBtn">Speichern</button>
+        <span id="planSaveStatus" class="subtitle" style="margin-left:10px;"></span>
       </div>
+    </div>` : ""}
+
+    <div class="panel kodex-panel plan-panel">
+      ${renderPlanTextHtml(data.text)}
     </div>
   `;
+
+  if (isAdmin) {
+    document.getElementById("planEditToggle").onclick = () => {
+      const box = document.getElementById("planEditBox");
+      box.hidden = !box.hidden;
+    };
+    document.getElementById("planSaveBtn").onclick = async () => {
+      const val = document.getElementById("planEditArea").value;
+      const statusEl = document.getElementById("planSaveStatus");
+      statusEl.textContent = "Speichere …";
+      try {
+        await api("/plan3tage", { method: "POST", body: JSON.stringify({ text: val }) });
+        renderPlan3Tage();
+      } catch (e) {
+        statusEl.textContent = "";
+        alert(e.message);
+      }
+    };
+  }
 }
 
 // ---------- Dokumente & Dateien ----------
@@ -2426,6 +2522,15 @@ extraUiStyle.textContent = `
 .admin-points-control .num-input { width:90px; height:32px; }
 .reassign-box { flex-basis:100%; display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin-top:8px; }
 .reassign-box .assignment-picker { width:100%; max-width:380px; }
+.plan-panel { line-height:1.55; }
+.plan-title { color:#2e9e4d; text-align:center; font-size:1.9em; text-decoration:underline; margin:6px 0 18px; }
+.plan-day { color:#d9534f; text-align:center; font-size:1.2em; margin:22px 0 10px; }
+.plan-time { color:#b485e0; text-align:center; font-weight:800; margin:14px 0 8px; }
+.plan-note { color:#d9a441; text-align:center; font-style:italic; margin:8px 0; }
+.plan-alert { color:#2e9e4d; text-align:center; font-weight:800; margin:10px 0; }
+.plan-line { margin:4px 0; }
+.plan-space { height:6px; }
+#planEditArea { color:var(--text,#fff); }
 `;
 document.head.appendChild(extraUiStyle);
 
