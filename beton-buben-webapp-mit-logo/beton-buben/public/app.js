@@ -868,23 +868,21 @@ async function renderDashboard(opts = {}) {
       </div>
     </div>
 
-    <div class="grid grid-2">
-      <div class="panel">
-        <div class="toolbar" style="margin-bottom:2px;">
-          <h2 style="margin:0;">🕒 Heutiger Zeitstrahl</h2>
-          <button type="button" class="btn small secondary" data-goto-zeitstrahl>Ganzer Zeitstrahl ▶</button>
-        </div>
-        <div class="subtitle" style="margin:6px 0 0;">${fmtDatumKurz(heutigDatum)}</div>
-        ${zeitstrahlTimelineHtml(heutigeItems, true)}
+    <div class="panel">
+      <div class="toolbar" style="margin-bottom:2px;">
+        <h2 style="margin:0;">🕒 Heutiger Zeitstrahl</h2>
+        <button type="button" class="btn small secondary" data-goto-zeitstrahl>Ganzer Zeitstrahl ▶</button>
       </div>
+      <div class="subtitle" style="margin:6px 0 0;">${fmtDatumKurz(heutigDatum)}</div>
+      ${zeitstrahlTimelineHtml(heutigeItems, true)}
+    </div>
 
-      <div class="panel overview-progress-panel">
-        <h2>🏗️ Baufortschritt</h2>
-        <div class="stadium-progress-wrap">
-          <div class="stadium-progress-count">${fertigeLayer} von ${layerGesamt} Layern fertig</div>
-          <div class="stadium-progress"><div class="stadium-progress-fill" style="width:${layerProzent}%"></div></div>
-          <div class="stadium-progress-percent">${layerProzent}%</div>
-        </div>
+    <div class="panel overview-progress-panel">
+      <h2>🏗️ Baufortschritt</h2>
+      <div class="stadium-progress-wrap">
+        <div class="stadium-progress-count">${fertigeLayer} von ${layerGesamt} Layern fertig</div>
+        <div class="stadium-progress"><div class="stadium-progress-fill" style="width:${layerProzent}%"></div></div>
+        <div class="stadium-progress-percent">${layerProzent}%</div>
       </div>
     </div>
 
