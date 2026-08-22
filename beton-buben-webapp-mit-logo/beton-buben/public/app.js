@@ -65,6 +65,14 @@ function fmtCountdown(remainingSeconds) {
   const ss = String(s % 60).padStart(2, "0");
   return (overtime ? "+" : "") + `${hh}:${mm}:${ss}`;
 }
+// Statische HH:MM-Anzeige einer Gesamtdauer (z. B. gesetzte erwartete Zeit
+// einer noch nicht gestarteten Aufgabe) — ohne Sekunden, ohne Countdown.
+function fmtHM(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds || 0));
+  const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
 
 // ---------- Avatare ----------
 
@@ -105,6 +113,12 @@ function ensureAssignmentStyles() {
     .stadium-progress{height:14px;border-radius:999px;background:#30333a;overflow:hidden}
     .stadium-progress-fill{height:100%;border-radius:999px;background:#48b96b;transition:width .35s ease}
     .stadium-progress-percent{font-weight:700;min-width:48px;text-align:right}
+    .zeit-eingabe{display:flex;align-items:center;gap:9px;background:var(--panel,#17191d);border:1px solid var(--border,#333);border-radius:10px;padding:0 12px;height:40px}
+    .zeit-label{font-size:.85em;color:var(--text-dim,#aaa);white-space:nowrap}
+    .zeit-felder{display:flex;align-items:center;gap:4px}
+    .zeit-teil{width:36px;height:28px;background:#0f1013;border:1px solid #3a3d44;border-radius:6px;color:var(--text,#fff);text-align:center;font-variant-numeric:tabular-nums;font-weight:700;padding:0;-moz-appearance:textfield;appearance:textfield}
+    .zeit-teil::-webkit-outer-spin-button,.zeit-teil::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+    .zeit-sep{color:var(--text-dim,#aaa);font-weight:700}
     @media(max-width:650px){.stadium-progress-wrap{grid-template-columns:1fr}.stadium-progress-percent{text-align:left}.assignment-picker{max-width:none}}
   `;
   document.head.appendChild(s);
@@ -150,6 +164,30 @@ function setAssignmentMode(form, multiple) {
   if (!multiple) picker.querySelectorAll("input[type=checkbox]").forEach((x) => x.checked = false);
   if (multiple) single.value = "";
   setupAssignmentPicker(form);
+}
+
+// Liest das HH:MM-Eingabefeld für die erwartete Zeit aus einem Formular
+// und liefert die Gesamtminuten (Stunden werden nicht künstlich begrenzt,
+// Minuten auf 0–59 geklemmt, damit "70 Minuten" nicht versehentlich als
+// gültiger Wert durchrutscht).
+function getErwarteteMinuten(form) {
+  const stdEl = form.querySelector('[name="erwartete_std"]');
+  const minEl = form.querySelector('[name="erwartete_min"]');
+  const std = Math.max(0, parseInt(stdEl && stdEl.value) || 0);
+  const min = Math.max(0, Math.min(59, parseInt(minEl && minEl.value) || 0));
+  return std * 60 + min;
+}
+
+function zeitEingabeHtml() {
+  return `
+    <div class="zeit-eingabe" title="Optional: Countdown ab Start. Läuft ins Minus, wenn überschritten.">
+      <span class="zeit-label">⏳ Erwartete Zeit</span>
+      <div class="zeit-felder">
+        <input type="number" name="erwartete_std" min="0" max="99" placeholder="00" class="zeit-teil" inputmode="numeric" />
+        <span class="zeit-sep">:</span>
+        <input type="number" name="erwartete_min" min="0" max="59" placeholder="00" class="zeit-teil" inputmode="numeric" />
+      </div>
+    </div>`;
 }
 
 // ---------- Boot ----------
@@ -607,6 +645,8 @@ function layerActionsHtml(l, { includeDelete = false } = {}) {
 // (erwartete_sekunden > 0), wird ein Countdown gezeigt (zählt runter,
 // pausiert exakt beim aktuellen Stand, geht bei Überschreitung ins Minus).
 // Ohne erwartete Zeit bleibt es bei der einfachen Stoppuhr wie bisher.
+// Noch nicht gestartete Aufgaben mit gesetzter erwarteter Zeit zeigen die
+// Zieldauer statisch als HH:MM an (⏳-Badge statt ⏱-Countdown).
 function taskTimerHtml(t) {
   const erwartet = t.erwartete_sekunden || 0;
   if (t.status === "LAEUFT" && t.start_zeit) {
@@ -617,6 +657,9 @@ function taskTimerHtml(t) {
   }
   if (t.status === "PAUSIERT" && erwartet > 0) {
     return `<span class="work-timer paused">⏸ ${fmtCountdown(erwartet - (t.verbrauchte_sekunden || 0))}</span>`;
+  }
+  if (t.status === "OFFEN" && erwartet > 0) {
+    return `<span class="work-timer paused">⏳ ${fmtHM(erwartet)}</span>`;
   }
   return "";
 }
@@ -672,7 +715,7 @@ async function renderAufgaben() {
           <option value="NORMAL" selected>Normal</option>
           <option value="HOCH">Hoch</option>
         </select>
-        <input type="number" name="erwartete_minuten" min="0" placeholder="Erwartete Zeit (Min.)" class="num-input" style="width:150px;height:40px;" title="Optional: Countdown ab Start. Läuft ins Minus, wenn überschritten." />
+        ${zeitEingabeHtml()}
         ${canAssign ? `
         <div class="assignment-box" style="flex:1;min-width:260px;">
           <div class="assignment-mode">
@@ -709,7 +752,7 @@ async function renderAufgaben() {
         body: JSON.stringify({
           titel: f.get("titel"),
           prioritaet: f.get("prioritaet"),
-          erwartete_minuten: f.get("erwartete_minuten") ? Number(f.get("erwartete_minuten")) : 0,
+          erwartete_minuten: getErwarteteMinuten(e.target),
           zustaendig_user_ids: (() => {
             const multi = getSelectedAssignmentIds(e.target);
             const single = f.get("zustaendig_user_id");
