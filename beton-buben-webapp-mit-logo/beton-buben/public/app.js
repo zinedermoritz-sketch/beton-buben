@@ -11,6 +11,7 @@ let state = {
   blockLayers: null,      // Cache der Litematica-Blocklisten (aus /block-layers)
   blockFocusNr: null,     // Welcher Block-Layer beim Öffnen des Blöcke-Tabs fokussiert werden soll
   zeitstrahlDatum: null,  // Aktuell gewähltes Datum im Zeitstrahl-Tab (YYYY-MM-DD)
+  zeitstrahlHandle: null, // Live-Update-Intervall, damit überzogene/laufende Termine im Zeitstrahl live weiterwachsen
 };
 
 const $app = document.getElementById("app");
@@ -84,6 +85,13 @@ function fmtTerminKurz(datum, zeit) {
   return zeit ? `${tag} · ${zeit} Uhr` : tag;
 }
 
+// Wandelt Zeilenumbrüche in <br> um — für mehrzeilige, schöner formatierte Texte
+// (z. B. Beschreibungen bei Kalender-/Event-Einträgen oder Vorschlägen). Erwartet
+// bereits escapten Text als Eingabe.
+function nl2br(escapedText) {
+  return String(escapedText || "").replace(/\n/g, "<br>");
+}
+
 // ---------- Avatare ----------
 
 function avatarHtml(avatar, size) {
@@ -146,15 +154,19 @@ function ensureAssignmentStyles() {
     .zeitstrahl-track{position:relative;min-width:960px;background:#15171b;border:1px solid #2c2f36;border-radius:10px;overflow:hidden}
     .zeitstrahl-gridline{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,.06)}
     .zeitstrahl-nowline{position:absolute;top:0;bottom:0;width:2px;background:var(--yellow,#f2c744);z-index:5}
-    .zeitstrahl-block{position:absolute;border-radius:8px;background:#48b96b;color:#0c1a10;padding:6px 8px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.35);display:flex;flex-direction:column;justify-content:center;cursor:default}
+    .zeitstrahl-block{position:absolute;border-radius:8px;background:#48b96b;color:#0c1a10;padding:6px 8px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.35);display:flex;flex-direction:column;justify-content:center;cursor:default;transition:left .4s ease,width .4s ease}
     .zeitstrahl-block.layer{background:#5f8fc4;color:#0c1420}
     .zeitstrahl-block.laeuft{outline:2px solid var(--yellow,#f2c744)}
     .zeitstrahl-block.fertig{opacity:.55}
+    .zeitstrahl-block.overtime{background:#d9534f;color:#2a0d0d}
+    .zeitstrahl-block.overtime.laeuft{outline:2px solid #ffb3b3}
     .zeitstrahl-block-zeit{font-weight:800;font-size:.78em;line-height:1.1}
     .zeitstrahl-block-titel{font-size:.82em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2}
     .zeitstrahl-legende{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:.85em;color:var(--text-dim,#aaa)}
     .zeitstrahl-legende span{display:inline-flex;align-items:center;gap:6px}
     .zeitstrahl-legende i{display:inline-block;width:12px;height:12px;border-radius:3px}
+    .schematic-panel .task-form{align-items:flex-end}
+    .schematic-panel .num-input{width:130px;height:40px}
     @media(max-width:650px){.stadium-progress-wrap{grid-template-columns:1fr}.stadium-progress-percent{text-align:left}.assignment-picker{max-width:none}.zeitstrahl-hours,.zeitstrahl-track{min-width:720px}}
   `;
   document.head.appendChild(s);
@@ -408,6 +420,9 @@ async function boot() {
   ensureAssignmentStyles();
   ensureBloeckeTab();
   ensureZeitstrahlTab();
+  ensureVorschlaegeTab();
+  ensurePlanTab();
+  ensureTabEmojis();
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.view = btn.dataset.view;
@@ -465,6 +480,57 @@ function ensureZeitstrahlTab() {
   $tabs.appendChild(btn);
 }
 
+// Fügt den "💡 Vorschläge"-Tab-Button dynamisch neben den bestehenden Tabs ein.
+// Jeder kann dort Vorschläge einreichen, der Admin nimmt an oder lehnt ab.
+function ensureVorschlaegeTab() {
+  if (!$tabs || document.querySelector('[data-view="vorschlaege"]')) return;
+  const btn = document.createElement("button");
+  btn.className = "tab";
+  btn.dataset.view = "vorschlaege";
+  btn.textContent = "💡 Vorschläge";
+  $tabs.appendChild(btn);
+}
+
+// Fügt den "📋 3-Tage-Plan"-Tab-Button dynamisch neben den bestehenden Tabs ein.
+// Ersetzt den früheren PDF-Download auf der Startseite durch eine direkt
+// lesbare, schön formatierte Übersicht.
+function ensurePlanTab() {
+  if (!$tabs || document.querySelector('[data-view="plan3tage"]')) return;
+  const btn = document.createElement("button");
+  btn.className = "tab";
+  btn.dataset.view = "plan3tage";
+  btn.textContent = "📋 3-Tage-Plan";
+  $tabs.appendChild(btn);
+}
+
+// Beschriftungen (inkl. Emoji links vor dem Namen) für alle Abteilungen/Tabs.
+// Wird einmalig beim Boot über die vorhandenen Tab-Buttons gelegt — so muss
+// die index.html nicht angepasst werden, egal welchen Text sie ursprünglich hatte.
+const TAB_LABELS = {
+  dashboard: "🏠 Übersicht",
+  aufgaben: "📋 Aufgaben",
+  stadion: "🏟️ Stadion",
+  bloecke: "🧱 Blöcke",
+  zeitstrahl: "🕒 Zeitstrahl",
+  shop: "🛒 Shop",
+  gruppen: "👷 Gruppen",
+  kalender: "📅 Kalender",
+  vorschlaege: "💡 Vorschläge",
+  plan3tage: "📋 3-Tage-Plan",
+  dateien: "📎 Dateien",
+  zeitlog: "🕓 Zeitlog",
+  leaderboard: "🏆 Rangliste",
+  statistik: "📊 Statistik",
+  kodex: "📜 Kodex",
+  admin: "⚙️ Verwaltung",
+};
+function ensureTabEmojis() {
+  document.querySelectorAll(".tab").forEach((btn) => {
+    const label = TAB_LABELS[btn.dataset.view];
+    if (label) btn.textContent = label;
+  });
+}
+
 function applyTabVisibility() {
   const adminTab = document.querySelector('[data-view="admin"]');
   const statTab = document.querySelector('[data-view="statistik"]');
@@ -519,7 +585,7 @@ async function loadNotifPanel() {
 }
 
 function notifIcon(typ) {
-  return { AUFGABE_ZUGEWIESEN: "📋", AUFGABE_ERLEDIGT: "✅", LAYER_ZUGEWIESEN: "🏟️", LAYER_FERTIG: "🧱", SHOP_KAUF: "🛒", SHOP_ERLEDIGT: "🎁", EVENT_NEU: "📅", DATEI_NEU: "📎", PUNKTE_GUTSCHRIFT: "🪙" }[typ] || "🔔";
+  return { AUFGABE_ZUGEWIESEN: "📋", AUFGABE_ERLEDIGT: "✅", LAYER_ZUGEWIESEN: "🏟️", LAYER_FERTIG: "🧱", SHOP_KAUF: "🛒", SHOP_ERLEDIGT: "🎁", EVENT_NEU: "📅", DATEI_NEU: "📎", PUNKTE_GUTSCHRIFT: "🪙", VORSCHLAG_NEU: "💡", VORSCHLAG_ENTSCHIEDEN: "💡" }[typ] || "🔔";
 }
 
 function updateNotifBadge(count) {
@@ -578,6 +644,7 @@ function renderAuth(mode) {
   if (state.tickHandle) clearInterval(state.tickHandle);
   if (state.workTimerHandle) clearInterval(state.workTimerHandle);
   if (state.notifHandle) clearInterval(state.notifHandle);
+  if (state.zeitstrahlHandle) clearInterval(state.zeitstrahlHandle);
 
   if (mode === "login") {
     $app.innerHTML = `
@@ -675,6 +742,7 @@ function render() {
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
   if (state.tickHandle) clearInterval(state.tickHandle);
   if (state.workTimerHandle) clearInterval(state.workTimerHandle);
+  if (state.zeitstrahlHandle) clearInterval(state.zeitstrahlHandle);
 
   const views = {
     dashboard: renderDashboard,
@@ -685,6 +753,8 @@ function render() {
     shop: renderShop,
     gruppen: renderGruppen,
     kalender: renderKalender,
+    vorschlaege: renderVorschlaege,
+    plan3tage: renderPlan3Tage,
     dateien: renderDateien,
     zeitlog: renderZeitlog,
     leaderboard: renderLeaderboard,
@@ -693,6 +763,36 @@ function render() {
     admin: renderAdmin,
   };
   (views[state.view] || renderDashboard)();
+}
+
+// ---------- Schematic-Platzierung (Dashboard-Hinweis) ----------
+// Zeigt allen an, bei welcher Koordinate die Schematic platziert werden soll.
+// Nur der Admin kann die drei Felder (X/Y/Z) bearbeiten und speichern.
+function schematicPanelHtml(coords, isAdmin) {
+  const hatKoords = coords && coords.x !== null && coords.y !== null && coords.z !== null;
+  if (isAdmin) {
+    return `
+    <div class="panel schematic-panel">
+      <h2>🧭 Schematic-Platzierung</h2>
+      <div class="subtitle" style="margin-bottom:12px;">Trage hier ein, bei welcher Koordinate die Schematic im Bauplan platziert werden soll — sichtbar für die ganze Crew.</div>
+      <form id="schematicForm" class="task-form">
+        <input type="number" step="1" name="x" placeholder="z. B. 108" class="num-input" value="${coords && coords.x !== null ? coords.x : ""}" />
+        <span class="zeit-label">X</span>
+        <input type="number" step="1" name="y" placeholder="z. B. 40" class="num-input" value="${coords && coords.y !== null ? coords.y : ""}" />
+        <span class="zeit-label">Y</span>
+        <input type="number" step="1" name="z" placeholder="z. B. 310" class="num-input" value="${coords && coords.z !== null ? coords.z : ""}" />
+        <span class="zeit-label">Z</span>
+        <button class="btn small" type="submit">Speichern</button>
+      </form>
+    </div>`;
+  }
+  return `
+    <div class="panel schematic-panel">
+      <h2>🧭 Schematic-Platzierung</h2>
+      <div class="subtitle">${hatKoords
+        ? `Die Schematic soll bei Koordinate <strong>X: ${coords.x}</strong>, <strong>Y: ${coords.y}</strong>, <strong>Z: ${coords.z}</strong> platziert werden.`
+        : "Es wurde noch keine Koordinate für die Schematic hinterlegt — frag einen Admin."}</div>
+    </div>`;
 }
 
 // ---------- Dashboard ----------
@@ -711,7 +811,7 @@ async function renderDashboard() {
   state.me = me;
   applyTabVisibility();
   document.getElementById("whoAvatar").innerHTML = avatarHtml(me.avatar, 26);
-  const [{ tasks }, { layers }] = await Promise.all([api("/tasks"), api("/stadion/layers")]);
+  const [{ tasks }, { layers }, schematic] = await Promise.all([api("/tasks"), api("/stadion/layers"), api("/schematic")]);
   const overviewUsers = [];
   const meineAufgaben = tasks.filter((t) => (t.zustaendig_user_id === me.id || (t.assignees || []).some((a) => a.id === me.id)) && t.status !== "ERLEDIGT").slice(0, 4);
   const meineLayer = layers.filter((l) => (l.zustaendig_user_id === me.id || (l.assignees || []).some((a) => a.id === me.id)) && l.status !== "FERTIG").slice(0, 4);
@@ -737,6 +837,8 @@ async function renderDashboard() {
         <div class="power-caption">${me.online ? "läuft seit " + fmtDate(me.online_seit) : "Klicke zum Starten"}</div>
       </div>
     </div>
+
+    ${schematicPanelHtml(schematic, me.is_admin)}
 
     <div class="panel">
       <h2>🏗️ Meine Layer in Arbeit</h2>
@@ -782,15 +884,15 @@ async function renderDashboard() {
 
     <div class="panel">
       <h2>📐 Baupläne</h2>
-      <div class="subtitle" style="margin-bottom:12px;">Die aktuellen Baupläne zum Download.</div>
+      <div class="subtitle" style="margin-bottom:12px;">Die aktuellen Baupläne zum Download bzw. Nachlesen.</div>
       <ul class="task-list">
         <li class="task-item">
           <span class="titel">🏟️ Bauplan für Stadion<div class="task-meta">Litematica-Datei (.litematic)</div></span>
           <a class="btn small secondary" href="/plaene/unnamed.litematic" download>⬇ Download</a>
         </li>
         <li class="task-item">
-          <span class="titel">📋 Plan für die ersten drei Tage<div class="task-meta">PDF-Zeitplan</div></span>
-          <a class="btn small secondary" href="/plaene/Buildattack_02_Plan.pdf" download>⬇ Download</a>
+          <span class="titel">📋 Plan für die ersten drei Tage<div class="task-meta">Jetzt direkt hier im Tab statt als PDF</div></span>
+          <button type="button" class="btn small secondary" data-goto-plan>Ansehen</button>
         </li>
       </ul>
     </div>
@@ -806,6 +908,23 @@ async function renderDashboard() {
   document.querySelectorAll("[data-avatar]").forEach((b) => b.onclick = async () => {
     try { await api("/me/avatar", { method: "POST", body: JSON.stringify({ avatar: b.dataset.avatar }) }); renderDashboard(); }
     catch (e) { alert(e.message); }
+  });
+
+  const schematicForm = document.getElementById("schematicForm");
+  if (schematicForm) {
+    schematicForm.onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      try {
+        await api("/schematic", { method: "POST", body: JSON.stringify({ x: f.get("x"), y: f.get("y"), z: f.get("z") }) });
+        renderDashboard();
+      } catch (err) { alert(err.message); }
+    };
+  }
+
+  document.querySelectorAll("[data-goto-plan]").forEach((b) => b.onclick = () => {
+    state.view = "plan3tage";
+    render();
   });
 
   // Aufgaben direkt aus der Übersicht starten/pausieren/fortsetzen/abschließen
@@ -1303,8 +1422,15 @@ function blockLayerCardHtml(l, isFocus) {
 // Achse an. Die Balkenlänge kommt aus der bereits vorhandenen "Erwartete
 // Zeit" (erwartete_sekunden) — ohne gesetzte Dauer wird ein kleiner
 // Platzhalter-Balken (30 Min.) gezeigt, damit der Termin trotzdem sichtbar ist.
+//
+// Überzogene Termine: Läuft ein Termin länger als die erwartete Zeit (oder ist
+// er länger gelaufen, bevor er abgeschlossen wurde), wird der Balken rot und
+// wächst live mit der tatsächlich verbrauchten Zeit mit. Ist die Aufgabe/Layer
+// dabei bereits erledigt, bleibt der Balken rot, wird aber transparenter
+// (kombiniert sich mit der bestehenden "fertig"-Klasse).
 
 async function renderZeitstrahl() {
+  if (state.zeitstrahlHandle) clearInterval(state.zeitstrahlHandle);
   $app.innerHTML = `<div class="empty">Lade Zeitstrahl …</div>`;
   if (!state.zeitstrahlDatum) state.zeitstrahlDatum = todayStrLocal();
   const datum = state.zeitstrahlDatum;
@@ -1313,12 +1439,22 @@ async function renderZeitstrahl() {
   const items = [];
   tasks.forEach((t) => {
     if (t.geplant_datum === datum && t.geplant_zeit) {
-      items.push({ kind: "task", titel: t.titel, zeit: t.geplant_zeit, dauerSek: t.erwartete_sekunden || 1800, status: t.status });
+      items.push({
+        kind: "task", titel: t.titel, zeit: t.geplant_zeit, status: t.status,
+        erwartetSek: t.erwartete_sekunden || 0,
+        verbrauchtSek: t.verbrauchte_sekunden || 0,
+        startZeitIso: t.start_zeit || null,
+      });
     }
   });
   layers.forEach((l) => {
     if (l.geplant_datum === datum && l.geplant_zeit) {
-      items.push({ kind: "layer", titel: `L${l.layer_nr} · ${l.name}`, zeit: l.geplant_zeit, dauerSek: l.erwartete_sekunden || 1800, status: l.status });
+      items.push({
+        kind: "layer", titel: `L${l.layer_nr} · ${l.name}`, zeit: l.geplant_zeit, status: l.status,
+        erwartetSek: l.erwartete_sekunden || 0,
+        verbrauchtSek: l.verbrauchte_sekunden || 0,
+        startZeitIso: l.start_zeit || null,
+      });
     }
   });
 
@@ -1326,7 +1462,7 @@ async function renderZeitstrahl() {
 
   $app.innerHTML = `
     <h1>🕒 Zeitstrahl</h1>
-    <div class="subtitle">Geplante Aufgaben & Layer im 24-Stunden-Überblick. Termin & Dauer werden beim Anlegen einer Aufgabe/Layer festgelegt (oder direkt dort nachträglich geändert).</div>
+    <div class="subtitle">Geplante Aufgaben & Layer im 24-Stunden-Überblick. Termin & Dauer werden beim Anlegen einer Aufgabe/Layer festgelegt (oder direkt dort nachträglich geändert). Läuft etwas über die geplante Zeit hinaus, wächst der Balken rot weiter.</div>
 
     <div class="panel">
       <div class="zeitstrahl-nav">
@@ -1341,7 +1477,8 @@ async function renderZeitstrahl() {
         <span><i style="background:#48b96b"></i> Aufgabe</span>
         <span><i style="background:#5f8fc4"></i> Stadion-Layer</span>
         <span><i style="background:#48b96b;outline:2px solid var(--yellow,#f2c744)"></i> läuft gerade</span>
-        <span><i style="background:#48b96b;opacity:.55"></i> erledigt/fertig</span>
+        <span><i style="background:#d9534f"></i> über der geplanten Zeit</span>
+        <span><i style="background:#d9534f;opacity:.55"></i> erledigt (war überzogen)</span>
       </div>
     </div>
   `;
@@ -1350,6 +1487,15 @@ async function renderZeitstrahl() {
   document.getElementById("zsToday").onclick = () => { state.zeitstrahlDatum = todayStrLocal(); renderZeitstrahl(); };
   document.getElementById("zsPrev").onclick = () => { state.zeitstrahlDatum = shiftDatum(state.zeitstrahlDatum, -1); renderZeitstrahl(); };
   document.getElementById("zsNext").onclick = () => { state.zeitstrahlDatum = shiftDatum(state.zeitstrahlDatum, 1); renderZeitstrahl(); };
+
+  // Laufen gerade Termine, wird die Seite alle 20 Sekunden neu geladen, damit
+  // überzogene Balken live weiterwachsen (siehe Beschreibung oben).
+  const hatLaufende = items.some((it) => it.status === "LAEUFT");
+  if (hatLaufende) {
+    state.zeitstrahlHandle = setInterval(() => {
+      if (state.view === "zeitstrahl") renderZeitstrahl();
+    }, 20000);
+  }
 }
 
 // Verschiebt ein Datum (YYYY-MM-DD) um deltaDays Tage.
@@ -1365,18 +1511,38 @@ function zeitToMinuten(zeit) {
   return h * 60 + (m || 0);
 }
 
+// Berechnet die tatsächlich verbrauchte Zeit (in Sekunden) eines Zeitstrahl-Eintrags
+// bis zum übergebenen Zeitpunkt: bereits abgeschlossene Phasen (verbrauchtSek) plus
+// die laufende Phase, falls der Termin gerade läuft.
+function berechneAktuelleSekunden(it, jetztMs) {
+  let sek = it.verbrauchtSek || 0;
+  if (it.status === "LAEUFT" && it.startZeitIso) {
+    sek += Math.max(0, (jetztMs - new Date(it.startZeitIso).getTime()) / 1000);
+  }
+  return sek;
+}
+
 // Baut die eigentliche 24-Stunden-Balkenansicht. Überlappende Termine bekommen
 // automatisch eigene Spuren (Zeilen) zugewiesen, wie bei einem kleinen Gantt-Diagramm.
+// Balken, die ihre geplante Dauer überschreiten, werden rot und so lang wie die
+// tatsächlich verbrauchte Zeit (statt der ursprünglich geplanten).
 function zeitstrahlTimelineHtml(items, istHeute) {
   if (!items.length) return `<div class="empty" style="margin-top:14px;">Für diesen Tag sind noch keine Termine geplant.</div>`;
 
+  const jetztMs = Date.now();
   const sorted = [...items].sort((a, b) => zeitToMinuten(a.zeit) - zeitToMinuten(b.zeit));
   const laneEnden = []; // laneEnden[i] = Ende (in Minuten) der letzten Belegung dieser Spur
   sorted.forEach((it) => {
     const start = zeitToMinuten(it.zeit);
-    const ende = start + Math.max(10, it.dauerSek / 60);
+    const aktuelleSek = berechneAktuelleSekunden(it, jetztMs);
+    const geplantDauerMin = it.erwartetSek > 0 ? it.erwartetSek / 60 : 30; // Platzhalter ohne gesetzte Dauer
+    const aktuelleDauerMin = aktuelleSek / 60;
+    const isOvertime = it.erwartetSek > 0 && aktuelleSek > it.erwartetSek;
+    const effektiveDauerMin = Math.max(10, geplantDauerMin, aktuelleDauerMin);
+    const ende = start + effektiveDauerMin;
     it._start = start;
     it._ende = ende;
+    it._overtime = isOvertime;
     let lane = laneEnden.findIndex((endeBelegt) => endeBelegt <= start);
     if (lane === -1) { lane = laneEnden.length; laneEnden.push(ende); }
     else laneEnden[lane] = ende;
@@ -1402,8 +1568,12 @@ function zeitstrahlTimelineHtml(items, istHeute) {
           const width = Math.max(0.9, ((it._ende - it._start) / 1440) * 100);
           const top = it._lane * laneHoehe + 14;
           const fertigStatus = it.status === "ERLEDIGT" || it.status === "FERTIG";
-          const cls = fertigStatus ? "fertig" : it.status === "LAEUFT" ? "laeuft" : "";
-          return `<div class="zeitstrahl-block ${it.kind} ${cls}" style="left:${left}%;width:${width}%;top:${top}px;height:${laneHoehe - 12}px" title="${escapeHtml(it.titel)} · ${it.zeit} Uhr">
+          const cls = [
+            fertigStatus ? "fertig" : "",
+            it.status === "LAEUFT" ? "laeuft" : "",
+            it._overtime ? "overtime" : "",
+          ].filter(Boolean).join(" ");
+          return `<div class="zeitstrahl-block ${it.kind} ${cls}" style="left:${left}%;width:${width}%;top:${top}px;height:${laneHoehe - 12}px" title="${escapeHtml(it.titel)} · ${it.zeit} Uhr${it._overtime ? " · über der geplanten Zeit" : ""}">
             <span class="zeitstrahl-block-zeit">${it.zeit}</span>
             <span class="zeitstrahl-block-titel">${escapeHtml(it.titel)}</span>
           </div>`;
@@ -1596,7 +1766,7 @@ async function renderKalender() {
         <input type="text" name="titel" placeholder="Titel" required style="flex:1;min-width:180px;" />
         <input type="date" name="datum" class="select-dark" required />
         <input type="time" name="zeit" class="select-dark" />
-        <input type="text" name="beschreibung" placeholder="Beschreibung (optional)" style="flex:2;min-width:220px;" />
+        <input type="text" name="beschreibung" placeholder="Beschreibung (optional, mehrere Zeilen möglich)" style="flex:2;min-width:220px;" />
         <button class="btn small" type="submit">Eintragen</button>
       </form>
     </div>` : ""}
@@ -1647,7 +1817,7 @@ function kalenderItemHtml(e) {
     return `<div class="kalender-item event">
       <div class="kalender-datum">${fmtDatumKurz(e.datum)}${e.zeit ? " · " + e.zeit + " Uhr" : ""}</div>
       <div class="kalender-titel">🎉 ${escapeHtml(e.titel)} ${kannLoeschen ? `<button class="ghost-btn tiny" data-kaldelete="${e.id}">🗑</button>` : ""}</div>
-      ${e.beschreibung ? `<div class="kalender-desc">${escapeHtml(e.beschreibung)}</div>` : ""}
+      ${e.beschreibung ? `<div class="kalender-desc">${nl2br(escapeHtml(e.beschreibung))}</div>` : ""}
       <div class="kalender-meta">von ${escapeHtml(e.ersteller_name || "?")}</div>
       <div class="vote-row">
         <button class="btn small ${e.meine_stimme === 'ZEIT' ? '' : 'secondary'}" data-vote="ZEIT" data-entry="${e.id}">✅ Zeit (${e.zeit_count})</button>
@@ -1658,9 +1828,99 @@ function kalenderItemHtml(e) {
   return `<div class="kalender-item">
     <div class="kalender-datum">${fmtDatumKurz(e.datum)}${e.zeit ? " · " + e.zeit + " Uhr" : ""}</div>
     <div class="kalender-titel">${escapeHtml(e.titel)} ${kannLoeschen ? `<button class="ghost-btn tiny" data-kaldelete="${e.id}">🗑</button>` : ""}</div>
-    ${e.beschreibung ? `<div class="kalender-desc">${escapeHtml(e.beschreibung)}</div>` : ""}
+    ${e.beschreibung ? `<div class="kalender-desc">${nl2br(escapeHtml(e.beschreibung))}</div>` : ""}
     <div class="kalender-meta">von ${escapeHtml(e.ersteller_name || "?")}</div>
   </div>`;
+}
+
+// ---------- Vorschläge ----------
+// Jeder angemeldete Nutzer kann einen Vorschlag einreichen, der Admin nimmt an
+// oder lehnt ab (Backend-Endpunkte /vorschlaege bereits vorhanden).
+
+async function renderVorschlaege() {
+  $app.innerHTML = `<div class="empty">Lade Vorschläge …</div>`;
+  const { vorschlaege } = await api("/vorschlaege");
+  const offen = vorschlaege.filter((v) => v.status === "OFFEN");
+  const entschieden = vorschlaege.filter((v) => v.status !== "OFFEN");
+
+  $app.innerHTML = `
+    <h1>💡 Vorschläge</h1>
+    <div class="subtitle">Jeder kann einen Vorschlag einreichen — der Admin entscheidet, ob er umgesetzt wird.</div>
+
+    <div class="panel">
+      <h2>Neuen Vorschlag einreichen</h2>
+      <form id="vorschlagForm" class="task-form" style="flex-wrap:wrap;">
+        <input type="text" name="titel" placeholder="Worum geht's?" required style="flex:1;min-width:200px;" />
+        <input type="text" name="beschreibung" placeholder="Beschreibung (optional)" style="flex:2;min-width:220px;" />
+        <button class="btn small" type="submit">Einreichen</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Offene Vorschläge (${offen.length})</h2>
+      ${offen.length ? `<ul class="task-list">${offen.map((v) => vorschlagItemHtml(v, state.me.is_admin)).join("")}</ul>` : `<div class="empty">Aktuell keine offenen Vorschläge.</div>`}
+    </div>
+
+    ${entschieden.length ? `
+    <div class="panel">
+      <h2>Entschiedene Vorschläge</h2>
+      <ul class="task-list">${entschieden.map((v) => vorschlagItemHtml(v, state.me.is_admin)).join("")}</ul>
+    </div>` : ""}
+  `;
+
+  document.getElementById("vorschlagForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api("/vorschlaege", { method: "POST", body: JSON.stringify({ titel: f.get("titel"), beschreibung: f.get("beschreibung") }) });
+      renderVorschlaege();
+    } catch (err) { alert(err.message); }
+  };
+
+  document.querySelectorAll("[data-vaccept]").forEach((b) => b.onclick = async () => {
+    try { await api(`/vorschlaege/${b.dataset.vaccept}/entscheiden`, { method: "POST", body: JSON.stringify({ status: "ANGENOMMEN" }) }); renderVorschlaege(); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-vreject]").forEach((b) => b.onclick = async () => {
+    try { await api(`/vorschlaege/${b.dataset.vreject}/entscheiden`, { method: "POST", body: JSON.stringify({ status: "ABGELEHNT" }) }); renderVorschlaege(); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-vdelete]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Vorschlag wirklich löschen?")) return;
+    try { await api(`/vorschlaege/${b.dataset.vdelete}`, { method: "DELETE" }); renderVorschlaege(); }
+    catch (e) { alert(e.message); }
+  });
+}
+
+function vorschlagItemHtml(v, isAdmin) {
+  const statusLabel = { OFFEN: "⏳ Offen", ANGENOMMEN: "✅ Angenommen", ABGELEHNT: "❌ Abgelehnt" }[v.status] || v.status;
+  const kannLoeschen = isAdmin || v.erstellt_von === state.me.id;
+  return `<li class="task-item">
+    <span class="titel">${escapeHtml(v.titel)}${v.beschreibung ? `<div class="task-meta">${nl2br(escapeHtml(v.beschreibung))}</div>` : ""}<div class="task-meta">von ${escapeHtml(v.ersteller_name || "?")} · ${fmtDate(v.erstellt_am)}</div></span>
+    <span class="status-pill">${statusLabel}</span>
+    ${isAdmin && v.status === "OFFEN" ? `<button class="btn small" data-vaccept="${v.id}">✅ Annehmen</button> <button class="btn small secondary" data-vreject="${v.id}">❌ Ablehnen</button>` : ""}
+    ${kannLoeschen ? `<button class="btn small secondary" data-vdelete="${v.id}">🗑</button>` : ""}
+  </li>`;
+}
+
+// ---------- Plan für die ersten drei Tage ----------
+// Ersetzt den bisherigen PDF-Download auf der Startseite. Der Inhalt fehlt noch
+// (die PDF-Datei selbst liegt Claude nicht vor) — sobald der Text/die Datei
+// bereitgestellt wird, kommt er hier schön formatiert (Tag für Tag) rein.
+
+function renderPlan3Tage() {
+  $app.innerHTML = `
+    <h1>📋 Plan für die ersten drei Tage</h1>
+    <div class="subtitle">Der Ablaufplan für den Baustart — statt als PDF jetzt direkt hier zum Nachlesen.</div>
+
+    <div class="panel kodex-panel">
+      <div class="empty">
+        Hier fehlt noch der Inhalt! Schick mir den Text (oder Screenshots/die Datei) von
+        „Buildattack_02_Plan.pdf", dann baue ich daraus eine schön formatierte
+        Tag-für-Tag-Übersicht an dieser Stelle.
+      </div>
+    </div>
+  `;
 }
 
 // ---------- Dokumente & Dateien ----------
