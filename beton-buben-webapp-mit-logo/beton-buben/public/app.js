@@ -10,6 +10,7 @@ let state = {
   notifPermAsked: false,
   blockLayers: null,      // Cache der Litematica-Blocklisten (aus /block-layers)
   blockFocusNr: null,     // Welcher Block-Layer beim Öffnen des Blöcke-Tabs fokussiert werden soll
+  zeitstrahlDatum: null,  // Aktuell gewähltes Datum im Zeitstrahl-Tab (YYYY-MM-DD)
 };
 
 const $app = document.getElementById("app");
@@ -75,6 +76,13 @@ function fmtHM(totalSeconds) {
   const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
   return `${hh}:${mm}`;
 }
+// Kurze Anzeige eines geplanten Termins, z. B. "28.06.2026" oder "28.06.2026 · 16:00 Uhr".
+function fmtTerminKurz(datum, zeit) {
+  if (!datum) return "";
+  const d = new Date(datum + "T00:00:00");
+  const tag = d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
+  return zeit ? `${tag} · ${zeit} Uhr` : tag;
+}
 
 // ---------- Avatare ----------
 
@@ -128,7 +136,26 @@ function ensureAssignmentStyles() {
     .block-layer-chip.active{border-color:var(--yellow,#f2c744);color:var(--yellow,#f2c744);box-shadow:0 0 0 1px var(--yellow,#f2c744) inset}
     .block-layer-card.focused{border:1px solid var(--yellow,#f2c744);box-shadow:0 0 0 1px var(--yellow,#f2c744) inset}
     .block-layer-select{max-width:100%}
-    @media(max-width:650px){.stadium-progress-wrap{grid-template-columns:1fr}.stadium-progress-percent{text-align:left}.assignment-picker{max-width:none}}
+    .termin-eingabe{display:flex;align-items:center;gap:8px;background:var(--panel,#17191d);border:1px solid var(--border,#333);border-radius:10px;padding:0 12px;height:40px}
+    .termin-eingabe input{background:#0f1013;border:1px solid #3a3d44;border-radius:6px;color:var(--text,#fff);padding:4px 8px;height:30px}
+    .termin-quickedit{display:inline-flex;gap:6px;flex-wrap:wrap;margin-left:4px}
+    .zeitstrahl-nav{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .zeitstrahl-wrap{overflow-x:auto;padding-bottom:6px;margin-top:12px}
+    .zeitstrahl-hours{position:relative;height:22px;min-width:960px;margin-bottom:4px}
+    .zeitstrahl-hour{position:absolute;transform:translateX(-50%);font-size:.78em;color:var(--text-dim,#aaa)}
+    .zeitstrahl-track{position:relative;min-width:960px;background:#15171b;border:1px solid #2c2f36;border-radius:10px;overflow:hidden}
+    .zeitstrahl-gridline{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,.06)}
+    .zeitstrahl-nowline{position:absolute;top:0;bottom:0;width:2px;background:var(--yellow,#f2c744);z-index:5}
+    .zeitstrahl-block{position:absolute;border-radius:8px;background:#48b96b;color:#0c1a10;padding:6px 8px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.35);display:flex;flex-direction:column;justify-content:center;cursor:default}
+    .zeitstrahl-block.layer{background:#5f8fc4;color:#0c1420}
+    .zeitstrahl-block.laeuft{outline:2px solid var(--yellow,#f2c744)}
+    .zeitstrahl-block.fertig{opacity:.55}
+    .zeitstrahl-block-zeit{font-weight:800;font-size:.78em;line-height:1.1}
+    .zeitstrahl-block-titel{font-size:.82em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2}
+    .zeitstrahl-legende{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:.85em;color:var(--text-dim,#aaa)}
+    .zeitstrahl-legende span{display:inline-flex;align-items:center;gap:6px}
+    .zeitstrahl-legende i{display:inline-block;width:12px;height:12px;border-radius:3px}
+    @media(max-width:650px){.stadium-progress-wrap{grid-template-columns:1fr}.stadium-progress-percent{text-align:left}.assignment-picker{max-width:none}.zeitstrahl-hours,.zeitstrahl-track{min-width:720px}}
   `;
   document.head.appendChild(s);
 }
@@ -199,6 +226,19 @@ function zeitEingabeHtml() {
     </div>`;
 }
 
+// Eingabefeld für den geplanten Termin (Datum + Uhrzeit) einer Aufgabe/Layer.
+// Getrennt von der "Erwartete Zeit" oben — das ist die DAUER, das hier ist
+// WANN es losgehen soll. Wird beim Anlegen mitgeschickt und erscheint dann
+// im "Zeitstrahl"-Tab als Balken im 24-Stunden-Überblick.
+function terminEingabeHtml() {
+  return `
+    <div class="termin-eingabe" title="Optional: Wann ist das geplant? Erscheint dann im Zeitstrahl-Tab.">
+      <span class="zeit-label">📅 Termin</span>
+      <input type="date" name="geplant_datum" class="select-dark" />
+      <input type="time" name="geplant_zeit" class="select-dark" />
+    </div>`;
+}
+
 // Eingabefeld für einen optionalen Link an einer Aufgabe (z. B. Bauplan,
 // Referenzbild, Video-Tutorial). Wird beim Anlegen der Aufgabe mitgeschickt.
 function linkEingabeHtml() {
@@ -210,6 +250,46 @@ function linkEingabeHtml() {
 function taskLinkButtonHtml(t) {
   if (!t.link) return "";
   return `<a class="btn small secondary task-link-btn" href="${escapeHtml(t.link)}" target="_blank" rel="noopener noreferrer">🔗 Link</a>`;
+}
+
+// Kleine Info-Zeile mit dem geplanten Termin einer Aufgabe/Layer (falls gesetzt).
+function terminBadgeHtml(item) {
+  if (!item.geplant_datum) return "";
+  return `<div class="task-meta">📅 ${escapeHtml(fmtTerminKurz(item.geplant_datum, item.geplant_zeit))}</div>`;
+}
+
+// Kleine Inline-Bearbeitung des geplanten Termins direkt an einer Aufgabe/Layer
+// (nur für Berechtigte sichtbar). Speichert sofort bei Änderung, analog zur
+// Blockliste-Schnellauswahl.
+function terminQuickEditHtml(kind, id, datum, zeit) {
+  const key = `${kind}-${id}`;
+  return `<span class="termin-quickedit">
+    <input type="date" class="select-dark select-inline" data-termin-datum="${key}" value="${datum || ""}" title="Geplantes Datum ändern" />
+    <input type="time" class="select-dark select-inline" data-termin-zeit="${key}" value="${zeit || ""}" title="Geplante Uhrzeit ändern" />
+  </span>`;
+}
+
+// Bindet die Termin-Schnellbearbeitung in einem gerade gerenderten Container ein.
+// callback wird nach erfolgreichem Speichern aufgerufen (i. d. R. der jeweilige render*()).
+function wireTerminControls(callback) {
+  function speichern(kind, id) {
+    const key = `${kind}-${id}`;
+    const datumEl = document.querySelector(`[data-termin-datum="${key}"]`);
+    const zeitEl = document.querySelector(`[data-termin-zeit="${key}"]`);
+    if (!datumEl || !zeitEl) return;
+    const endpoint = kind === "layer" ? `/stadion/layers/${id}/termin` : `/tasks/${id}/termin`;
+    api(endpoint, { method: "POST", body: JSON.stringify({ datum: datumEl.value || "", zeit: zeitEl.value || "" }) })
+      .then(() => callback())
+      .catch((e) => alert(e.message));
+  }
+  document.querySelectorAll("[data-termin-datum]").forEach((el) => el.onchange = () => {
+    const [kind, id] = el.dataset.terminDatum.split("-");
+    speichern(kind, id);
+  });
+  document.querySelectorAll("[data-termin-zeit]").forEach((el) => el.onchange = () => {
+    const [kind, id] = el.dataset.terminZeit.split("-");
+    speichern(kind, id);
+  });
 }
 
 // ---------- Neu-Zuweisen (Aufgaben & Layer) ----------
@@ -327,6 +407,7 @@ function wireBlocksControls(callback) {
 async function boot() {
   ensureAssignmentStyles();
   ensureBloeckeTab();
+  ensureZeitstrahlTab();
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.view = btn.dataset.view;
@@ -370,6 +451,17 @@ function ensureBloeckeTab() {
   btn.className = "tab";
   btn.dataset.view = "bloecke";
   btn.textContent = "🧱 Blöcke";
+  $tabs.appendChild(btn);
+}
+
+// Fügt den "🕒 Zeitstrahl"-Tab-Button dynamisch neben den bestehenden Tabs ein,
+// aus demselben Grund wie oben bei "🧱 Blöcke" — kein Eingriff in index.html nötig.
+function ensureZeitstrahlTab() {
+  if (!$tabs || document.querySelector('[data-view="zeitstrahl"]')) return;
+  const btn = document.createElement("button");
+  btn.className = "tab";
+  btn.dataset.view = "zeitstrahl";
+  btn.textContent = "🕒 Zeitstrahl";
   $tabs.appendChild(btn);
 }
 
@@ -589,6 +681,7 @@ function render() {
     aufgaben: renderAufgaben,
     stadion: renderStadion,
     bloecke: renderBloecke,
+    zeitstrahl: renderZeitstrahl,
     shop: renderShop,
     gruppen: renderGruppen,
     kalender: renderKalender,
@@ -839,7 +932,7 @@ function dashboardTaskHtml(t) {
   const cls = t.status === "ERLEDIGT" ? "done" : "";
   const names = (t.assignees || []).map((a) => a.vorname + " " + a.nachname).join(" / ") || t.zustaendig_name || "";
   return `<li class="task-item ${cls}">
-    <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}</span>
+    <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${terminBadgeHtml(t)}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
     ${taskTimerHtml(t)}
     ${taskLinkButtonHtml(t)}
@@ -852,7 +945,7 @@ function dashboardLayerHtml(l) {
   const cls = l.status === "FERTIG" ? "done" : "";
   const names = (l.assignees || []).map((a) => a.vorname + " " + a.nachname).join(" / ") || l.zustaendig_name || "";
   return `<li class="task-item ${cls}">
-    <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}</span>
+    <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${terminBadgeHtml(l)}</span>
     <span class="status-pill ${l.status}">${STATUS_LABEL[l.status] || l.status}</span>
     ${layerTimerHtml(l)}
     ${blocksJumpButtonHtml(l)}
@@ -883,6 +976,7 @@ async function renderAufgaben() {
           <option value="HOCH">Hoch</option>
         </select>
         ${zeitEingabeHtml()}
+        ${terminEingabeHtml()}
         ${linkEingabeHtml()}
         ${canAssign ? `
         <div class="assignment-box" style="flex:1;min-width:260px;">
@@ -922,6 +1016,8 @@ async function renderAufgaben() {
           prioritaet: f.get("prioritaet"),
           erwartete_minuten: getErwarteteMinuten(e.target),
           link: f.get("link") || "",
+          datum: f.get("geplant_datum") || "",
+          zeit: f.get("geplant_zeit") || "",
           zustaendig_user_ids: (() => {
             const multi = getSelectedAssignmentIds(e.target);
             const single = f.get("zustaendig_user_id");
@@ -971,6 +1067,8 @@ async function renderAufgaben() {
   // Neu-Zuweisen-Steuerelemente (Picker öffnen/schließen + Speichern)
   wireReassignControls(renderAufgaben);
   setupAssignmentPicker(document);
+  // Termin-Schnellbearbeitung (Datum/Uhrzeit direkt an der Aufgabe ändern)
+  wireTerminControls(renderAufgaben);
 }
 
 function fullTaskHtml(t, spielerUsers = [], canAssign = false) {
@@ -985,14 +1083,17 @@ function fullTaskHtml(t, spielerUsers = [], canAssign = false) {
   const acceptBtn = kannAnnehmen ? `<button class="btn small" data-accept="${t.id}">🙋 Annehmen</button>` : "";
   // Admin/Berechtigte können jederzeit neu zuweisen — auch nach Zuweisung oder freiwilliger Annahme.
   const reassignBtn = canAssign ? reassignControlHtml("task", t.id, spielerUsers, assignees.map((a) => a.id)) : "";
+  // Admin/Berechtigte können den geplanten Termin jederzeit direkt hier ändern.
+  const terminEdit = canAssign ? terminQuickEditHtml("task", t.id, t.geplant_datum, t.geplant_zeit) : "";
   return `<li class="task-item ${cls}">
-    <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
+    <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}${terminBadgeHtml(t)}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
     ${taskTimerHtml(t)}
     ${taskLinkButtonHtml(t)}
     ${acceptBtn}
     ${actions}
     ${reassignBtn}
+    ${terminEdit}
   </li>`;
 }
 
@@ -1042,6 +1143,7 @@ async function renderStadion() {
       <form id="layerForm" class="task-form">
         <input type="text" name="name" placeholder="z. B. Fundament, Rang 1, Dachkonstruktion …" required />
         ${zeitEingabeHtml()}
+        ${terminEingabeHtml()}
         ${blockLayerSelectHtml(blockLayers, 0)}
         <div class="assignment-box" style="flex:1;min-width:260px;">
           <div class="assignment-mode">
@@ -1080,6 +1182,8 @@ async function renderStadion() {
           body: JSON.stringify({
             name: f.get("name"),
             erwartete_minuten: getErwarteteMinuten(e.target),
+            datum: f.get("geplant_datum") || "",
+            zeit: f.get("geplant_zeit") || "",
             blocklayer_nr: Number(f.get("blocklayer_nr")) || 0,
             zustaendig_user_ids: (() => {
               const multi = getSelectedAssignmentIds(e.target);
@@ -1115,6 +1219,8 @@ async function renderStadion() {
   setupAssignmentPicker(document);
   // "🧱 Blöcke"-Buttons + Blockliste-Schnellauswahl je Layer
   wireBlocksControls(renderStadion);
+  // Termin-Schnellbearbeitung (Datum/Uhrzeit direkt an der Layer ändern)
+  wireTerminControls(renderStadion);
 }
 
 function layerItemHtml(l, canAssign, spielerUsers = [], blockLayers = []) {
@@ -1130,14 +1236,17 @@ function layerItemHtml(l, canAssign, spielerUsers = [], blockLayers = []) {
   // Verknüpfte Blockliste: Sprung-Button für alle, Schnellauswahl zum Ändern nur für Berechtigte.
   const blocksBtn = blocksJumpButtonHtml(l);
   const blockQuickEdit = canAssign ? blockLinkQuickEditHtml(l.id, l.blocklayer_nr, blockLayers) : "";
+  // Admin/Berechtigte können den geplanten Termin jederzeit direkt hier ändern.
+  const terminEdit = canAssign ? terminQuickEditHtml("layer", l.id, l.geplant_datum, l.geplant_zeit) : "";
   return `<li class="task-item ${cls}">
-    <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
+    <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}${terminBadgeHtml(l)}</span>
     <span class="status-pill ${l.status}">${STATUS_LABEL[l.status] || l.status}</span>
     ${layerTimerHtml(l)}
     ${blocksBtn}
     ${actions}
     ${reassignBtn}
     ${blockQuickEdit}
+    ${terminEdit}
   </li>`;
 }
 
@@ -1186,6 +1295,121 @@ function blockLayerCardHtml(l, isFocus) {
       </table>
     </div>
   </div>`;
+}
+
+// ---------- Zeitstrahl (24-Stunden-Tagesplan für geplante Aufgaben & Layer) ----------
+// Zeigt für ein wählbares Datum alle Aufgaben und Stadion-Layer, die einen
+// geplanten Termin (Datum + Uhrzeit) haben, als Balken auf einer 24-Stunden-
+// Achse an. Die Balkenlänge kommt aus der bereits vorhandenen "Erwartete
+// Zeit" (erwartete_sekunden) — ohne gesetzte Dauer wird ein kleiner
+// Platzhalter-Balken (30 Min.) gezeigt, damit der Termin trotzdem sichtbar ist.
+
+async function renderZeitstrahl() {
+  $app.innerHTML = `<div class="empty">Lade Zeitstrahl …</div>`;
+  if (!state.zeitstrahlDatum) state.zeitstrahlDatum = todayStrLocal();
+  const datum = state.zeitstrahlDatum;
+  const [{ tasks }, { layers }] = await Promise.all([api("/tasks"), api("/stadion/layers")]);
+
+  const items = [];
+  tasks.forEach((t) => {
+    if (t.geplant_datum === datum && t.geplant_zeit) {
+      items.push({ kind: "task", titel: t.titel, zeit: t.geplant_zeit, dauerSek: t.erwartete_sekunden || 1800, status: t.status });
+    }
+  });
+  layers.forEach((l) => {
+    if (l.geplant_datum === datum && l.geplant_zeit) {
+      items.push({ kind: "layer", titel: `L${l.layer_nr} · ${l.name}`, zeit: l.geplant_zeit, dauerSek: l.erwartete_sekunden || 1800, status: l.status });
+    }
+  });
+
+  const istHeute = datum === todayStrLocal();
+
+  $app.innerHTML = `
+    <h1>🕒 Zeitstrahl</h1>
+    <div class="subtitle">Geplante Aufgaben & Layer im 24-Stunden-Überblick. Termin & Dauer werden beim Anlegen einer Aufgabe/Layer festgelegt (oder direkt dort nachträglich geändert).</div>
+
+    <div class="panel">
+      <div class="zeitstrahl-nav">
+        <button type="button" class="btn small secondary" id="zsPrev">◀ Vorheriger Tag</button>
+        <input type="date" id="zsDatum" value="${datum}" class="select-dark" />
+        <button type="button" class="btn small secondary" id="zsToday">Heute</button>
+        <button type="button" class="btn small secondary" id="zsNext">Nächster Tag ▶</button>
+      </div>
+      <div class="subtitle" style="margin:10px 0 0;">${fmtDatumKurz(datum)}</div>
+      ${zeitstrahlTimelineHtml(items, istHeute)}
+      <div class="zeitstrahl-legende">
+        <span><i style="background:#48b96b"></i> Aufgabe</span>
+        <span><i style="background:#5f8fc4"></i> Stadion-Layer</span>
+        <span><i style="background:#48b96b;outline:2px solid var(--yellow,#f2c744)"></i> läuft gerade</span>
+        <span><i style="background:#48b96b;opacity:.55"></i> erledigt/fertig</span>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("zsDatum").onchange = (e) => { state.zeitstrahlDatum = e.target.value || todayStrLocal(); renderZeitstrahl(); };
+  document.getElementById("zsToday").onclick = () => { state.zeitstrahlDatum = todayStrLocal(); renderZeitstrahl(); };
+  document.getElementById("zsPrev").onclick = () => { state.zeitstrahlDatum = shiftDatum(state.zeitstrahlDatum, -1); renderZeitstrahl(); };
+  document.getElementById("zsNext").onclick = () => { state.zeitstrahlDatum = shiftDatum(state.zeitstrahlDatum, 1); renderZeitstrahl(); };
+}
+
+// Verschiebt ein Datum (YYYY-MM-DD) um deltaDays Tage.
+function shiftDatum(datum, deltaDays) {
+  const d = new Date(datum + "T00:00:00");
+  d.setDate(d.getDate() + deltaDays);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+// Wandelt "HH:MM" in Minuten seit Mitternacht um.
+function zeitToMinuten(zeit) {
+  const [h, m] = zeit.split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+// Baut die eigentliche 24-Stunden-Balkenansicht. Überlappende Termine bekommen
+// automatisch eigene Spuren (Zeilen) zugewiesen, wie bei einem kleinen Gantt-Diagramm.
+function zeitstrahlTimelineHtml(items, istHeute) {
+  if (!items.length) return `<div class="empty" style="margin-top:14px;">Für diesen Tag sind noch keine Termine geplant.</div>`;
+
+  const sorted = [...items].sort((a, b) => zeitToMinuten(a.zeit) - zeitToMinuten(b.zeit));
+  const laneEnden = []; // laneEnden[i] = Ende (in Minuten) der letzten Belegung dieser Spur
+  sorted.forEach((it) => {
+    const start = zeitToMinuten(it.zeit);
+    const ende = start + Math.max(10, it.dauerSek / 60);
+    it._start = start;
+    it._ende = ende;
+    let lane = laneEnden.findIndex((endeBelegt) => endeBelegt <= start);
+    if (lane === -1) { lane = laneEnden.length; laneEnden.push(ende); }
+    else laneEnden[lane] = ende;
+    it._lane = lane;
+  });
+  const laneCount = laneEnden.length;
+  const laneHoehe = 54;
+  const gesamtHoehe = laneCount * laneHoehe + 24;
+
+  const stunden = Array.from({ length: 25 }, (_, i) => i);
+  const jetztMin = new Date().getHours() * 60 + new Date().getMinutes();
+
+  return `
+    <div class="zeitstrahl-wrap">
+      <div class="zeitstrahl-hours">
+        ${stunden.map((h) => `<span class="zeitstrahl-hour" style="left:${(h / 24) * 100}%">${String(h).padStart(2, "0")}</span>`).join("")}
+      </div>
+      <div class="zeitstrahl-track" style="height:${gesamtHoehe}px">
+        ${stunden.map((h) => `<div class="zeitstrahl-gridline" style="left:${(h / 24) * 100}%"></div>`).join("")}
+        ${istHeute ? `<div class="zeitstrahl-nowline" style="left:${(jetztMin / 1440) * 100}%" title="Jetzt"></div>` : ""}
+        ${sorted.map((it) => {
+          const left = (it._start / 1440) * 100;
+          const width = Math.max(0.9, ((it._ende - it._start) / 1440) * 100);
+          const top = it._lane * laneHoehe + 14;
+          const fertigStatus = it.status === "ERLEDIGT" || it.status === "FERTIG";
+          const cls = fertigStatus ? "fertig" : it.status === "LAEUFT" ? "laeuft" : "";
+          return `<div class="zeitstrahl-block ${it.kind} ${cls}" style="left:${left}%;width:${width}%;top:${top}px;height:${laneHoehe - 12}px" title="${escapeHtml(it.titel)} · ${it.zeit} Uhr">
+            <span class="zeitstrahl-block-zeit">${it.zeit}</span>
+            <span class="zeitstrahl-block-titel">${escapeHtml(it.titel)}</span>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>`;
 }
 
 // ---------- Punkte-Shop ----------
