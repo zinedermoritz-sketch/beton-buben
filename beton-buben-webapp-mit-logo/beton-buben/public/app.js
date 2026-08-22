@@ -156,6 +156,8 @@ function ensureAssignmentStyles() {
     .zeitstrahl-nowline{position:absolute;top:0;bottom:0;width:2px;background:var(--yellow,#f2c744);z-index:5}
     .zeitstrahl-block{position:absolute;border-radius:8px;background:#48b96b;color:#0c1a10;padding:6px 8px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.35);display:flex;flex-direction:column;justify-content:center;cursor:default;transition:left .4s ease,width .4s ease}
     .zeitstrahl-block.layer{background:#5f8fc4;color:#0c1420}
+    .zeitstrahl-block.kalender{background:#d9a441;color:#2a1e05}
+    .zeitstrahl-block.event{background:#b485e0;color:#241033}
     .zeitstrahl-block.laeuft{outline:2px solid var(--yellow,#f2c744)}
     .zeitstrahl-block.fertig{opacity:.55}
     .zeitstrahl-block.overtime{background:#d9534f;color:#2a0d0d}
@@ -1416,25 +1418,27 @@ function blockLayerCardHtml(l, isFocus) {
   </div>`;
 }
 
-// ---------- Zeitstrahl (24-Stunden-Tagesplan für geplante Aufgaben & Layer) ----------
-// Zeigt für ein wählbares Datum alle Aufgaben und Stadion-Layer, die einen
-// geplanten Termin (Datum + Uhrzeit) haben, als Balken auf einer 24-Stunden-
-// Achse an. Die Balkenlänge kommt aus der bereits vorhandenen "Erwartete
-// Zeit" (erwartete_sekunden) — ohne gesetzte Dauer wird ein kleiner
-// Platzhalter-Balken (30 Min.) gezeigt, damit der Termin trotzdem sichtbar ist.
+// ---------- Zeitstrahl (24-Stunden-Tagesplan für geplante Aufgaben, Layer & Kalender) ----------
+// Zeigt für ein wählbares Datum alle Aufgaben, Stadion-Layer UND Kalender-
+// Einträge/Events, die einen geplanten Termin (Datum + Uhrzeit) haben, als
+// Balken auf einer 24-Stunden-Achse an. Die Balkenlänge kommt aus der
+// jeweiligen "Erwarteten Zeit"/Dauer (erwartete_sekunden) — ohne gesetzte
+// Dauer wird ein kleiner Platzhalter-Balken (30 Min.) gezeigt, damit der
+// Termin trotzdem sichtbar ist.
 //
-// Überzogene Termine: Läuft ein Termin länger als die erwartete Zeit (oder ist
-// er länger gelaufen, bevor er abgeschlossen wurde), wird der Balken rot und
-// wächst live mit der tatsächlich verbrauchten Zeit mit. Ist die Aufgabe/Layer
-// dabei bereits erledigt, bleibt der Balken rot, wird aber transparenter
-// (kombiniert sich mit der bestehenden "fertig"-Klasse).
+// Überzogene Termine (nur Aufgaben/Layer, die wirklich laufen können): Läuft
+// ein Termin länger als die erwartete Zeit, wird der Balken rot und wächst
+// live mit der tatsächlich verbrauchten Zeit mit. Kalender-Einträge/Events
+// haben keinen Lauf-Status und werden daher einfach mit ihrer festen Dauer
+// angezeigt — in einer eigenen Farbe, damit sie sich von Aufgaben/Layern
+// abheben.
 
 async function renderZeitstrahl() {
   if (state.zeitstrahlHandle) clearInterval(state.zeitstrahlHandle);
   $app.innerHTML = `<div class="empty">Lade Zeitstrahl …</div>`;
   if (!state.zeitstrahlDatum) state.zeitstrahlDatum = todayStrLocal();
   const datum = state.zeitstrahlDatum;
-  const [{ tasks }, { layers }] = await Promise.all([api("/tasks"), api("/stadion/layers")]);
+  const [{ tasks }, { layers }, { eintraege }] = await Promise.all([api("/tasks"), api("/stadion/layers"), api("/kalender")]);
 
   const items = [];
   tasks.forEach((t) => {
@@ -1457,12 +1461,25 @@ async function renderZeitstrahl() {
       });
     }
   });
+  eintraege.forEach((e) => {
+    if (e.datum === datum && e.zeit) {
+      items.push({
+        kind: e.typ === "EVENT" ? "event" : "kalender",
+        titel: (e.typ === "EVENT" ? "🎉 " : "") + e.titel,
+        zeit: e.zeit,
+        status: "",
+        erwartetSek: e.erwartete_sekunden || 0,
+        verbrauchtSek: 0,
+        startZeitIso: null,
+      });
+    }
+  });
 
   const istHeute = datum === todayStrLocal();
 
   $app.innerHTML = `
     <h1>🕒 Zeitstrahl</h1>
-    <div class="subtitle">Geplante Aufgaben & Layer im 24-Stunden-Überblick. Termin & Dauer werden beim Anlegen einer Aufgabe/Layer festgelegt (oder direkt dort nachträglich geändert). Läuft etwas über die geplante Zeit hinaus, wächst der Balken rot weiter.</div>
+    <div class="subtitle">Geplante Aufgaben, Layer & Kalender-Einträge/Events im 24-Stunden-Überblick. Termin & Dauer werden beim Anlegen festgelegt (oder direkt dort nachträglich geändert). Läuft etwas über die geplante Zeit hinaus, wächst der Balken rot weiter.</div>
 
     <div class="panel">
       <div class="zeitstrahl-nav">
@@ -1476,6 +1493,8 @@ async function renderZeitstrahl() {
       <div class="zeitstrahl-legende">
         <span><i style="background:#48b96b"></i> Aufgabe</span>
         <span><i style="background:#5f8fc4"></i> Stadion-Layer</span>
+        <span><i style="background:#d9a441"></i> Kalender-Eintrag</span>
+        <span><i style="background:#b485e0"></i> Event</span>
         <span><i style="background:#48b96b;outline:2px solid var(--yellow,#f2c744)"></i> läuft gerade</span>
         <span><i style="background:#d9534f"></i> über der geplanten Zeit</span>
         <span><i style="background:#d9534f;opacity:.55"></i> erledigt (war überzogen)</span>
@@ -1753,7 +1772,7 @@ async function renderKalender() {
 
   $app.innerHTML = `
     <h1>📅 Kalender</h1>
-    <div class="subtitle">Termine & Events der Bau-Crew. Bei Events kannst du abstimmen, ob du Zeit hast.</div>
+    <div class="subtitle">Termine & Events der Bau-Crew. Bei Events kannst du abstimmen, ob du Zeit hast. Trag optional eine Dauer ein, dann erscheint der Termin auch im Zeitstrahl.</div>
 
     ${state.me.kann_kalender_erstellen || state.me.is_admin ? `
     <div class="panel">
@@ -1766,6 +1785,7 @@ async function renderKalender() {
         <input type="text" name="titel" placeholder="Titel" required style="flex:1;min-width:180px;" />
         <input type="date" name="datum" class="select-dark" required />
         <input type="time" name="zeit" class="select-dark" />
+        ${zeitEingabeHtml()}
         <input type="text" name="beschreibung" placeholder="Beschreibung (optional, mehrere Zeilen möglich)" style="flex:2;min-width:220px;" />
         <button class="btn small" type="submit">Eintragen</button>
       </form>
@@ -1790,7 +1810,14 @@ async function renderKalender() {
       try {
         await api("/kalender", {
           method: "POST",
-          body: JSON.stringify({ typ: f.get("typ"), titel: f.get("titel"), datum: f.get("datum"), zeit: f.get("zeit") || null, beschreibung: f.get("beschreibung") }),
+          body: JSON.stringify({
+            typ: f.get("typ"),
+            titel: f.get("titel"),
+            datum: f.get("datum"),
+            zeit: f.get("zeit") || null,
+            beschreibung: f.get("beschreibung"),
+            erwartete_minuten: getErwarteteMinuten(e.target),
+          }),
         });
         renderKalender();
       } catch (err) { alert(err.message); }
@@ -1811,6 +1838,12 @@ function todayStrLocal() {
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 }
 
+// Kleine Info-Zeile mit der eingetragenen Dauer eines Kalendereintrags/Events (falls gesetzt).
+function kalenderDauerBadgeHtml(e) {
+  if (!e.erwartete_sekunden) return "";
+  return `<div class="kalender-meta">⏳ Dauer: ${fmtHM(e.erwartete_sekunden)} Std.</div>`;
+}
+
 function kalenderItemHtml(e) {
   const kannLoeschen = state.me.is_admin || e.erstellt_von === state.me.id;
   if (e.typ === "EVENT") {
@@ -1818,6 +1851,7 @@ function kalenderItemHtml(e) {
       <div class="kalender-datum">${fmtDatumKurz(e.datum)}${e.zeit ? " · " + e.zeit + " Uhr" : ""}</div>
       <div class="kalender-titel">🎉 ${escapeHtml(e.titel)} ${kannLoeschen ? `<button class="ghost-btn tiny" data-kaldelete="${e.id}">🗑</button>` : ""}</div>
       ${e.beschreibung ? `<div class="kalender-desc">${nl2br(escapeHtml(e.beschreibung))}</div>` : ""}
+      ${kalenderDauerBadgeHtml(e)}
       <div class="kalender-meta">von ${escapeHtml(e.ersteller_name || "?")}</div>
       <div class="vote-row">
         <button class="btn small ${e.meine_stimme === 'ZEIT' ? '' : 'secondary'}" data-vote="ZEIT" data-entry="${e.id}">✅ Zeit (${e.zeit_count})</button>
@@ -1829,6 +1863,7 @@ function kalenderItemHtml(e) {
     <div class="kalender-datum">${fmtDatumKurz(e.datum)}${e.zeit ? " · " + e.zeit + " Uhr" : ""}</div>
     <div class="kalender-titel">${escapeHtml(e.titel)} ${kannLoeschen ? `<button class="ghost-btn tiny" data-kaldelete="${e.id}">🗑</button>` : ""}</div>
     ${e.beschreibung ? `<div class="kalender-desc">${nl2br(escapeHtml(e.beschreibung))}</div>` : ""}
+    ${kalenderDauerBadgeHtml(e)}
     <div class="kalender-meta">von ${escapeHtml(e.ersteller_name || "?")}</div>
   </div>`;
 }
