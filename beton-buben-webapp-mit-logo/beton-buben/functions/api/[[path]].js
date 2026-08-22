@@ -3,35 +3,35 @@
 // Benötigt: D1-Binding "DB" + Secret "JWT_SECRET" (siehe README.md)
 //
 // WICHTIG — KEINE D1-MIGRATION MEHR NÖTIG!
-// Frühere Version brauchte zusätzliche Tabellen (task_zuweisungen /
-// layer_zuweisungen) für Mehrfach-Zuweisung. Das ist jetzt entfernt, weil
-// keine D1-Migration vorausgesetzt werden kann. Stattdessen wird alles
-// (erwartete/verbrauchte Zeit, Liste der zugewiesenen Spieler-IDs, ein
-// optionaler Link, die Verknüpfung zu einem Litematica-Block-Layer UND
-// jetzt auch der geplante Termin — Datum + Uhrzeit) als kleines
-// JSON-Päckchen in ein bereits vorhandenes Textfeld gepackt:
-//   - Aufgaben:      im Feld "notiz" (wird sonst im UI nicht angezeigt/benutzt)
-//   - Stadion-Layer:  im Feld "name", angehängt hinter einem unsichtbaren
-//                      Trennzeichen, sodass der eigentliche Layer-Name beim
-//                      Anzeigen sauber abgetrennt bleibt.
+// Erwartete/verbrauchte Zeit, Liste der zugewiesenen Spieler-IDs, ein
+// optionaler Link, die Verknüpfung zu einem Litematica-Block-Layer, der
+// geplante Termin (Datum + Uhrzeit) UND jetzt auch die geplante DAUER eines
+// Kalendereintrags/Events werden als kleines JSON-Päckchen in ein bereits
+// vorhandenes Textfeld gepackt:
+//   - Aufgaben:            im Feld "notiz"
+//   - Stadion-Layer:        im Feld "name", angehängt hinter einem unsichtbaren
+//                            Trennzeichen, sodass der eigentliche Layer-Name beim
+//                            Anzeigen sauber abgetrennt bleibt.
+//   - Kalender-Einträge:    im Feld "beschreibung", genau wie bei Layern hinter
+//                            einem unsichtbaren Trennzeichen angehängt.
 // Siehe packMeta() / unpackMeta() weiter unten für die Details.
-// Es sind also KEINE neuen Tabellen und KEINE neuen Spalten nötig — die
-// bestehende D1-DB (users, tasks, stadium_layers, sessions, ranks, ...)
-// bleibt unverändert.
 //
-// NEU:
-//   - Aufgaben können jetzt einen optionalen Link bekommen (z. B. Bauplan,
-//     Video-Tutorial, Referenzbild). Wird im Meta-Feld "link" gespeichert.
-//   - Stadion-Layer können mit einem Litematica-Block-Layer verknüpft
-//     werden (Materialliste aus dem Bauplan). Die Blockdaten selbst liegen
-//     NICHT in D1, sondern als statisches Datenmodul "block-layers-data.js"
-//     (siehe eigene Datei) — einfach neben diese Datei legen und importieren.
-//   - Aufgaben UND Stadion-Layer können jetzt einen geplanten Termin
-//     bekommen (Datum + Uhrzeit, z. B. "28.06.2026 16:00 Uhr"). Wird als
-//     "datum" (YYYY-MM-DD) und "zeit" (HH:MM) im selben Meta-Päckchen
-//     gespeichert wie die erwartete Dauer. Der "Zeitstrahl"-Tab im Frontend
-//     nutzt datum + zeit + die bereits vorhandene erwartete Dauer, um einen
-//     24-Stunden-Tagesplan zu zeichnen.
+// NEU (Schematic-Platzierung):
+//   Das Frontend zeigt ein Dashboard-Panel, in dem der Admin X/Y/Z-Koordinaten
+//   für die Schematic-Platzierung einträgt (api("/schematic")). Dieser
+//   Endpunkt fehlte bisher komplett im Backend — dadurch schlug der
+//   Promise.all() beim Laden der Übersicht mit einem 404 fehl und das
+//   Dashboard blieb dauerhaft bei "Lade Baustelle …" hängen. Behoben, indem
+//   die Tabelle beim ersten Zugriff automatisch angelegt wird (kein manuelles
+//   D1-Migrationsskript nötig) und /schematic GET/POST bedient wird.
+//
+// NEU (Kalender-Dauer):
+//   Kalender-Einträge/Events können jetzt eine "erwartete Dauer" bekommen
+//   (genau wie Aufgaben/Layer über die HH:MM-Eingabe). Wird als "erw"
+//   (Sekunden) im selben Meta-Päckchen im Feld "beschreibung" gespeichert.
+//   Der Zeitstrahl-Tab zeigt Kalender-Einträge/Events jetzt ebenfalls als
+//   Balken an — in eigenen Farben (Kalender-Eintrag: amber, Event: lila),
+//   damit sie sich optisch von Aufgaben/Layern abheben.
 
 import { BLOCK_LAYERS } from "./block-layers-data.js";
 
@@ -170,6 +170,7 @@ function badgeFor(std) {
 //           Stadion-Layern genutzt (0 = keine Verknüpfung)
 //   datum = geplantes Datum im Format YYYY-MM-DD ("" = kein Termin geplant)
 //   zeit  = geplante Uhrzeit im Format HH:MM ("" = keine Uhrzeit gesetzt)
+// Bei Kalender-Einträgen wird aus diesem Päckchen nur "erw" (Dauer) genutzt.
 // Ist gar nichts davon gesetzt, bleibt das Feld unverändert/sauber.
 const META_MARK = "\u2063ZM\u2063";
 
@@ -398,6 +399,23 @@ async function verteilePunkte(env, punkte, assignees, fallbackUserId) {
   }
 }
 
+// ---------- Schematic-Platzierung ----------
+// Eine einzige feste Zeile (id=1) mit den X/Y/Z-Koordinaten, an denen die
+// Schematic im Bauplan platziert werden soll. Die Tabelle wird beim ersten
+// Zugriff automatisch angelegt — dadurch ist keine manuelle D1-Migration
+// nötig, egal auf welchem Stand die bestehende Datenbank ist.
+async function ensureSchematicTable(env) {
+  await env.DB.exec(
+    "CREATE TABLE IF NOT EXISTS schematic_platzierung (id INTEGER PRIMARY KEY CHECK (id = 1), x INTEGER, y INTEGER, z INTEGER)"
+  );
+}
+
+function parseCoordValue(raw) {
+  if (raw === "" || raw === undefined || raw === null) return null;
+  const n = parseInt(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ---------- Benachrichtigungen ----------
 
 async function notify(env, userId, typ, titel, text, link) {
@@ -592,6 +610,30 @@ export async function onRequest(context) {
       return json({ ok: true });
     }
 
+    // ---- SCHEMATIC-PLATZIERUNG ----
+    // GET ist für alle angemeldeten Nutzer offen (nur Anzeige), POST nur für Admins.
+
+    if (path === "/schematic" && method === "GET") {
+      await ensureSchematicTable(env);
+      const row = await env.DB.prepare("SELECT x, y, z FROM schematic_platzierung WHERE id = 1").first();
+      return json(row || { x: null, y: null, z: null });
+    }
+
+    if (path === "/schematic" && method === "POST") {
+      if (!user.is_admin) return err("Nur für Admins.", 403);
+      await ensureSchematicTable(env);
+      const x = parseCoordValue(body.x);
+      const y = parseCoordValue(body.y);
+      const z = parseCoordValue(body.z);
+      await env.DB.prepare(
+        `INSERT INTO schematic_platzierung (id, x, y, z) VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET x = excluded.x, y = excluded.y, z = excluded.z`
+      )
+        .bind(x, y, z)
+        .run();
+      return json({ ok: true, x, y, z });
+    }
+
     // ---- ONLINE-ZEIT ----
 
     if (path === "/session/toggle" && method === "POST") {
@@ -737,8 +779,6 @@ export async function onRequest(context) {
       const id = rankDeleteMatch[1];
       const rank = await env.DB.prepare("SELECT * FROM ranks WHERE id = ?").bind(id).first();
       if (!rank) return err("Rang nicht gefunden.", 404);
-      // FIX: vorher wurde HIER IMMER abgebrochen (auch für Nicht-Sklave-Ränge).
-      // Jetzt nur noch blockiert, wenn es wirklich der Rang "Sklave" ist.
       if (rank.name === "Sklave") return err('Der Rang "Sklave" kann nicht gelöscht werden.');
       const inUse = await env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE rank_id = ?").bind(id).first();
       if (inUse.c > 0) return err("Diesem Rang sind noch Spieler zugeordnet — erst umverteilen.");
@@ -933,7 +973,6 @@ export async function onRequest(context) {
       const { verb } = unpackMeta(task.notiz);
       const zusatz = task.start_zeit ? Math.max(0, (Date.now() - new Date(task.start_zeit).getTime()) / 1000) : 0;
       const neuerVerb = Math.round(verb + zusatz);
-      // setTaskMeta lässt "erw", "ids", "link" und "datum"/"zeit" unangetastet, ändert nur "verb".
       await setTaskMeta(env, id, { verb: neuerVerb });
       await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
@@ -1226,7 +1265,6 @@ export async function onRequest(context) {
       const { verb } = unpackMeta(layer.name);
       const zusatz = layer.start_zeit ? Math.max(0, (Date.now() - new Date(layer.start_zeit).getTime()) / 1000) : 0;
       const neuerVerb = Math.round(verb + zusatz);
-      // setLayerMeta lässt "base" (Layer-Name), "erw", "ids", "blk" und "datum"/"zeit" unangetastet, ändert nur "verb".
       await setLayerMeta(env, id, { verb: neuerVerb });
       await env.DB.prepare("UPDATE stadium_layers SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
@@ -1342,19 +1380,21 @@ export async function onRequest(context) {
       ).all();
       const out = [];
       for (const e of eintraege) {
+        const { base: beschreibungBase, erw } = unpackMeta(e.beschreibung);
+        const basis = { ...e, beschreibung: beschreibungBase, erwartete_sekunden: erw };
         if (e.typ === "EVENT") {
           const { results: votes } = await env.DB.prepare(
             "SELECT user_id, antwort, user_name FROM kalender_abstimmung WHERE entry_id = ?"
           ).bind(e.id).all();
           out.push({
-            ...e,
+            ...basis,
             votes,
             zeit_count: votes.filter((v) => v.antwort === "ZEIT").length,
             keine_zeit_count: votes.filter((v) => v.antwort === "KEINE_ZEIT").length,
             meine_stimme: (votes.find((v) => v.user_id === user.id) || {}).antwort || null,
           });
         } else {
-          out.push(e);
+          out.push(basis);
         }
       }
       return json({ eintraege: out });
@@ -1366,11 +1406,15 @@ export async function onRequest(context) {
       if (!titel || !titel.trim()) return err("Titel fehlt.");
       if (!datum) return err("Datum fehlt.");
       const t = typ === "EVENT" ? "EVENT" : "EINTRAG";
+      const erwSek = Math.max(0, parseInt(body.erwartete_minuten) || 0) * 60;
+      // Dauer wird hinter der eigentlichen Beschreibung (unsichtbar) mitgespeichert —
+      // genau wie bei Aufgaben/Layern, damit keine D1-Migration nötig ist.
+      const beschreibungWert = packMeta((beschreibung || "").trim(), { erw: erwSek });
       const res = await env.DB.prepare(
         `INSERT INTO kalender_eintraege (typ, titel, beschreibung, datum, zeit, erstellt_von, ersteller_name, erstellt_am)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
-        .bind(t, titel.trim(), (beschreibung || "").trim(), datum, zeit || null, user.id, meName, nowIso())
+        .bind(t, titel.trim(), beschreibungWert, datum, zeit || null, user.id, meName, nowIso())
         .run();
 
       if (t === "EVENT") {
