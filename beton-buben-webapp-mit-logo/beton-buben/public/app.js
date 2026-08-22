@@ -797,18 +797,35 @@ function schematicPanelHtml(coords, isAdmin) {
     </div>`;
 }
 
+// Kompakte Kennzahlen-Leiste (Punkte / Gesamtzeit / Zeit heute) — bewusst
+// schmal gehalten, damit sie zwar weit oben sichtbar ist, aber kaum Platz
+// frisst (ersetzt die frühere große 3-Kachel-Reihe weiter unten).
+function miniStatsRowHtml(me) {
+  return `
+    <div class="mini-stats-row">
+      <span class="mini-stat">🕓 Heute <strong>${fmtStd(me.heute_std)}</strong> Std.</span>
+      <span class="mini-stat">📊 Gesamt <strong>${fmtStd(me.gesamt_std)}</strong> Std.</span>
+      <span class="mini-stat">🪙 Punkte <strong>${me.punkte}</strong></span>
+    </div>`;
+}
+
 // ---------- Dashboard ----------
 
-async function renderDashboard() {
+// silent=true wird für den automatischen 20-Sekunden-Refresh genutzt (wenn im
+// heutigen Zeitstrahl-Mini-Panel gerade etwas läuft, siehe unten). Dabei wird
+// NICHT zuerst der "Lade Baustelle …"-Platzhalter angezeigt — genau das war
+// der Grund für das kurze Aufblitzen/Flackern der Seite alle paar Sekunden.
+async function renderDashboard(opts = {}) {
+  const silent = opts.silent === true;
+
   // Laufende Intervalle IMMER zuerst stoppen. Der On/Off-Schalter und die
-  // neuen Start/Pause/Fertig-Buttons rufen renderDashboard() direkt auf
-  // (nicht über render()), daher lief der alte Uhr-Timer sonst einfach
-  // weiter mit — mehrere Intervalle gleichzeitig ließen die Anzeige
-  // durcheinanderspringen bzw. hängen.
+  // Start/Pause/Fertig-Buttons rufen renderDashboard() direkt auf (nicht über
+  // render()), daher lief der alte Uhr-Timer sonst einfach weiter mit —
+  // mehrere Intervalle gleichzeitig ließen die Anzeige durcheinanderspringen.
   if (state.tickHandle) clearInterval(state.tickHandle);
   if (state.workTimerHandle) clearInterval(state.workTimerHandle);
 
-  $app.innerHTML = `<div class="empty">Lade Baustelle …</div>`;
+  if (!silent) $app.innerHTML = `<div class="empty">Lade Baustelle …</div>`;
   const me = await api("/me");
   state.me = me;
   applyTabVisibility();
@@ -833,6 +850,8 @@ async function renderDashboard() {
     <div class="subtitle">Deine Online-Zeit rechts, deine Aufgaben links. Alles landet in der Rangliste.
       ${me.rang ? ` · Rang: <span class="rank-chip" style="border-color:${me.rang.farbe};color:${me.rang.farbe}">${escapeHtml(me.rang.name)}</span>` : ""}</div>
 
+    ${miniStatsRowHtml(me)}
+
     <div class="grid grid-2">
       <div class="panel">
         <h2>Aufgaben in Arbeit</h2>
@@ -848,30 +867,17 @@ async function renderDashboard() {
     </div>
 
     <div class="panel">
+      <h2>🏗️ Meine Layer in Arbeit</h2>
+      ${meineLayer.length ? `<ul class="task-list">${meineLayer.map(dashboardLayerHtml).join("")}</ul>` : `<div class="empty">Dir sind aktuell keine Stadion-Layer zugewiesen.</div>`}
+    </div>
+
+    <div class="panel">
       <div class="toolbar" style="margin-bottom:2px;">
         <h2 style="margin:0;">🕒 Heutiger Zeitstrahl</h2>
         <button type="button" class="btn small secondary" data-goto-zeitstrahl>Ganzer Zeitstrahl ▶</button>
       </div>
       <div class="subtitle" style="margin:6px 0 0;">${fmtDatumKurz(heutigDatum)}</div>
       ${zeitstrahlTimelineHtml(heutigeItems, true)}
-    </div>
-
-    ${schematicPanelHtml(schematic, me.is_admin)}
-
-    <div class="panel">
-      <h2>🏗️ Meine Layer in Arbeit</h2>
-      ${meineLayer.length ? `<ul class="task-list">${meineLayer.map(dashboardLayerHtml).join("")}</ul>` : `<div class="empty">Dir sind aktuell keine Stadion-Layer zugewiesen.</div>`}
-    </div>
-
-    <div class="grid grid-3">
-      <div class="stat-tile"><div class="num">${fmtStd(me.heute_std)}</div><div class="label">Std. heute</div></div>
-      <div class="stat-tile"><div class="num">${fmtStd(me.gesamt_std)}</div><div class="label">Std. gesamt</div></div>
-      <div class="stat-tile punkte-tile"><div class="num">🪙 ${me.punkte}</div><div class="label">Punkte im Shop-Konto</div></div>
-    </div>
-
-    <div class="panel">
-      ${me.badge.current ? `<div class="badge-row"><span class="badge-icon">${me.badge.current.icon}</span><div><div class="badge-name">${me.badge.current.name}</div>${me.badge.next ? `<div class="badge-next">Nächstes Ziel: ${me.badge.next.icon} ${me.badge.next.name} bei ${me.badge.next.std} Std.</div>` : `<div class="badge-next">Höchste Stufe erreicht!</div>`}</div></div>`
-        : `<div class="badge-row"><span class="badge-icon">🚧</span><div><div class="badge-name">Noch kein Abzeichen</div><div class="badge-next">Erstes Ziel: 🧱 Grundstein gelegt bei 1 Std.</div></div></div>`}
     </div>
 
     <div class="panel overview-progress-panel">
@@ -881,6 +887,13 @@ async function renderDashboard() {
         <div class="stadium-progress"><div class="stadium-progress-fill" style="width:${layerProzent}%"></div></div>
         <div class="stadium-progress-percent">${layerProzent}%</div>
       </div>
+    </div>
+
+    ${schematicPanelHtml(schematic, me.is_admin)}
+
+    <div class="panel">
+      ${me.badge.current ? `<div class="badge-row"><span class="badge-icon">${me.badge.current.icon}</span><div><div class="badge-name">${me.badge.current.name}</div>${me.badge.next ? `<div class="badge-next">Nächstes Ziel: ${me.badge.next.icon} ${me.badge.next.name} bei ${me.badge.next.std} Std.</div>` : `<div class="badge-next">Höchste Stufe erreicht!</div>`}</div></div>`
+        : `<div class="badge-row"><span class="badge-icon">🚧</span><div><div class="badge-name">Noch kein Abzeichen</div><div class="badge-next">Erstes Ziel: 🧱 Grundstein gelegt bei 1 Std.</div></div></div>`}
     </div>
 
     <div class="panel">
@@ -1003,11 +1016,12 @@ async function renderDashboard() {
 
   // Läuft gerade ein Termin im heutigen Zeitstrahl-Mini-Panel, wird das
   // Dashboard alle 20 Sekunden neu geladen, damit überzogene Balken live
-  // weiterwachsen (analog zum vollen Zeitstrahl-Tab).
+  // weiterwachsen — jetzt im "silent"-Modus, ohne den Lade-Zwischenschritt,
+  // damit die Seite dabei nicht mehr kurz aufblitzt/flackert.
   const hatLaufende = heutigeItems.some((it) => it.status === "LAEUFT");
   if (hatLaufende) {
     state.zeitstrahlHandle = setInterval(() => {
-      if (state.view === "dashboard") renderDashboard();
+      if (state.view === "dashboard") renderDashboard({ silent: true });
     }, 20000);
   }
 }
@@ -1507,9 +1521,13 @@ function buildZeitstrahlItems(tasks, layers, eintraege, datum) {
   return items;
 }
 
-async function renderZeitstrahl() {
+// silent=true wird beim automatischen 20-Sekunden-Refresh genutzt (siehe
+// unten) und überspringt den "Lade Zeitstrahl …"-Platzhalter, damit der
+// Zeitstrahl-Tab beim Live-Update nicht mehr kurz aufblitzt/flackert.
+async function renderZeitstrahl(opts = {}) {
+  const silent = opts.silent === true;
   if (state.zeitstrahlHandle) clearInterval(state.zeitstrahlHandle);
-  $app.innerHTML = `<div class="empty">Lade Zeitstrahl …</div>`;
+  if (!silent) $app.innerHTML = `<div class="empty">Lade Zeitstrahl …</div>`;
   if (!state.zeitstrahlDatum) state.zeitstrahlDatum = todayStrLocal();
   const datum = state.zeitstrahlDatum;
   const [{ tasks }, { layers }, { eintraege }] = await Promise.all([api("/tasks"), api("/stadion/layers"), api("/kalender")]);
@@ -1549,11 +1567,11 @@ async function renderZeitstrahl() {
   document.getElementById("zsNext").onclick = () => { state.zeitstrahlDatum = shiftDatum(state.zeitstrahlDatum, 1); renderZeitstrahl(); };
 
   // Laufen gerade Termine, wird die Seite alle 20 Sekunden neu geladen, damit
-  // überzogene Balken live weiterwachsen (siehe Beschreibung oben).
+  // überzogene Balken live weiterwachsen — jetzt im "silent"-Modus (siehe oben).
   const hatLaufende = items.some((it) => it.status === "LAEUFT");
   if (hatLaufende) {
     state.zeitstrahlHandle = setInterval(() => {
-      if (state.view === "zeitstrahl") renderZeitstrahl();
+      if (state.view === "zeitstrahl") renderZeitstrahl({ silent: true });
     }, 20000);
   }
 }
@@ -1911,61 +1929,67 @@ function kalenderItemHtml(e) {
 
 // ---------- Vorschläge ----------
 // Jeder angemeldete Nutzer kann einen Vorschlag einreichen, der Admin nimmt an
-// oder lehnt ab (Backend-Endpunkte /vorschlaege bereits vorhanden).
+// oder lehnt ab. Vorher fehlten die passenden Backend-Endpunkte komplett,
+// weshalb dieser Tab dauerhaft bei "Lade Vorschläge …" hängen blieb — jetzt
+// ergänzt (siehe path.js: GET/POST /vorschlaege, POST .../entscheiden, DELETE).
 
 async function renderVorschlaege() {
   $app.innerHTML = `<div class="empty">Lade Vorschläge …</div>`;
-  const { vorschlaege } = await api("/vorschlaege");
-  const offen = vorschlaege.filter((v) => v.status === "OFFEN");
-  const entschieden = vorschlaege.filter((v) => v.status !== "OFFEN");
+  try {
+    const { vorschlaege } = await api("/vorschlaege");
+    const offen = vorschlaege.filter((v) => v.status === "OFFEN");
+    const entschieden = vorschlaege.filter((v) => v.status !== "OFFEN");
 
-  $app.innerHTML = `
-    <h1>💡 Vorschläge</h1>
-    <div class="subtitle">Jeder kann einen Vorschlag einreichen — der Admin entscheidet, ob er umgesetzt wird.</div>
+    $app.innerHTML = `
+      <h1>💡 Vorschläge</h1>
+      <div class="subtitle">Jeder kann einen Vorschlag einreichen — der Admin entscheidet, ob er umgesetzt wird.</div>
 
-    <div class="panel">
-      <h2>Neuen Vorschlag einreichen</h2>
-      <form id="vorschlagForm" class="task-form" style="flex-wrap:wrap;">
-        <input type="text" name="titel" placeholder="Worum geht's?" required style="flex:1;min-width:200px;" />
-        <input type="text" name="beschreibung" placeholder="Beschreibung (optional)" style="flex:2;min-width:220px;" />
-        <button class="btn small" type="submit">Einreichen</button>
-      </form>
-    </div>
+      <div class="panel">
+        <h2>Neuen Vorschlag einreichen</h2>
+        <form id="vorschlagForm" class="task-form" style="flex-wrap:wrap;">
+          <input type="text" name="titel" placeholder="Worum geht's?" required style="flex:1;min-width:200px;" />
+          <input type="text" name="beschreibung" placeholder="Beschreibung (optional)" style="flex:2;min-width:220px;" />
+          <button class="btn small" type="submit">Einreichen</button>
+        </form>
+      </div>
 
-    <div class="panel">
-      <h2>Offene Vorschläge (${offen.length})</h2>
-      ${offen.length ? `<ul class="task-list">${offen.map((v) => vorschlagItemHtml(v, state.me.is_admin)).join("")}</ul>` : `<div class="empty">Aktuell keine offenen Vorschläge.</div>`}
-    </div>
+      <div class="panel">
+        <h2>Offene Vorschläge (${offen.length})</h2>
+        ${offen.length ? `<ul class="task-list">${offen.map((v) => vorschlagItemHtml(v, state.me.is_admin)).join("")}</ul>` : `<div class="empty">Aktuell keine offenen Vorschläge.</div>`}
+      </div>
 
-    ${entschieden.length ? `
-    <div class="panel">
-      <h2>Entschiedene Vorschläge</h2>
-      <ul class="task-list">${entschieden.map((v) => vorschlagItemHtml(v, state.me.is_admin)).join("")}</ul>
-    </div>` : ""}
-  `;
+      ${entschieden.length ? `
+      <div class="panel">
+        <h2>Entschiedene Vorschläge</h2>
+        <ul class="task-list">${entschieden.map((v) => vorschlagItemHtml(v, state.me.is_admin)).join("")}</ul>
+      </div>` : ""}
+    `;
 
-  document.getElementById("vorschlagForm").onsubmit = async (e) => {
-    e.preventDefault();
-    const f = new FormData(e.target);
-    try {
-      await api("/vorschlaege", { method: "POST", body: JSON.stringify({ titel: f.get("titel"), beschreibung: f.get("beschreibung") }) });
-      renderVorschlaege();
-    } catch (err) { alert(err.message); }
-  };
+    document.getElementById("vorschlagForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      try {
+        await api("/vorschlaege", { method: "POST", body: JSON.stringify({ titel: f.get("titel"), beschreibung: f.get("beschreibung") }) });
+        renderVorschlaege();
+      } catch (err) { alert(err.message); }
+    };
 
-  document.querySelectorAll("[data-vaccept]").forEach((b) => b.onclick = async () => {
-    try { await api(`/vorschlaege/${b.dataset.vaccept}/entscheiden`, { method: "POST", body: JSON.stringify({ status: "ANGENOMMEN" }) }); renderVorschlaege(); }
-    catch (e) { alert(e.message); }
-  });
-  document.querySelectorAll("[data-vreject]").forEach((b) => b.onclick = async () => {
-    try { await api(`/vorschlaege/${b.dataset.vreject}/entscheiden`, { method: "POST", body: JSON.stringify({ status: "ABGELEHNT" }) }); renderVorschlaege(); }
-    catch (e) { alert(e.message); }
-  });
-  document.querySelectorAll("[data-vdelete]").forEach((b) => b.onclick = async () => {
-    if (!confirm("Vorschlag wirklich löschen?")) return;
-    try { await api(`/vorschlaege/${b.dataset.vdelete}`, { method: "DELETE" }); renderVorschlaege(); }
-    catch (e) { alert(e.message); }
-  });
+    document.querySelectorAll("[data-vaccept]").forEach((b) => b.onclick = async () => {
+      try { await api(`/vorschlaege/${b.dataset.vaccept}/entscheiden`, { method: "POST", body: JSON.stringify({ status: "ANGENOMMEN" }) }); renderVorschlaege(); }
+      catch (e) { alert(e.message); }
+    });
+    document.querySelectorAll("[data-vreject]").forEach((b) => b.onclick = async () => {
+      try { await api(`/vorschlaege/${b.dataset.vreject}/entscheiden`, { method: "POST", body: JSON.stringify({ status: "ABGELEHNT" }) }); renderVorschlaege(); }
+      catch (e) { alert(e.message); }
+    });
+    document.querySelectorAll("[data-vdelete]").forEach((b) => b.onclick = async () => {
+      if (!confirm("Vorschlag wirklich löschen?")) return;
+      try { await api(`/vorschlaege/${b.dataset.vdelete}`, { method: "DELETE" }); renderVorschlaege(); }
+      catch (e) { alert(e.message); }
+    });
+  } catch (err) {
+    $app.innerHTML = `<div class="empty">Vorschläge konnten nicht geladen werden: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
 function vorschlagItemHtml(v, isAdmin) {
@@ -2531,6 +2555,9 @@ extraUiStyle.textContent = `
 .plan-line { margin:4px 0; }
 .plan-space { height:6px; }
 #planEditArea { color:var(--text,#fff); }
+.mini-stats-row { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; margin:4px 0 16px; padding:8px 14px; background:var(--panel,#17191d); border:1px solid var(--border,#333); border-radius:10px; }
+.mini-stat { font-size:.85em; color:var(--text-dim,#aaa); white-space:nowrap; }
+.mini-stat strong { color:var(--text,#fff); font-variant-numeric:tabular-nums; }
 `;
 document.head.appendChild(extraUiStyle);
 
