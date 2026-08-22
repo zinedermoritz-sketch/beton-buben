@@ -6,7 +6,8 @@
 // Frühere Version brauchte zusätzliche Tabellen (task_zuweisungen /
 // layer_zuweisungen) für Mehrfach-Zuweisung. Das ist jetzt entfernt, weil
 // keine D1-Migration vorausgesetzt werden kann. Stattdessen wird alles
-// (erwartete/verbrauchte Zeit UND die Liste der zugewiesenen Spieler-IDs)
+// (erwartete/verbrauchte Zeit, Liste der zugewiesenen Spieler-IDs, ein
+// optionaler Link UND die Verknüpfung zu einem Litematica-Block-Layer)
 // als kleines JSON-Päckchen in ein bereits vorhandenes Textfeld gepackt:
 //   - Aufgaben:      im Feld "notiz" (wird sonst im UI nicht angezeigt/benutzt)
 //   - Stadion-Layer:  im Feld "name", angehängt hinter einem unsichtbaren
@@ -16,6 +17,16 @@
 // Es sind also KEINE neuen Tabellen und KEINE neuen Spalten nötig — die
 // bestehende D1-DB (users, tasks, stadium_layers, sessions, ranks, ...)
 // bleibt unverändert.
+//
+// NEU:
+//   - Aufgaben können jetzt einen optionalen Link bekommen (z. B. Bauplan,
+//     Video-Tutorial, Referenzbild). Wird im Meta-Feld "link" gespeichert.
+//   - Stadion-Layer können mit einem Litematica-Block-Layer verknüpft
+//     werden (Materialliste aus dem Bauplan). Die Blockdaten selbst liegen
+//     NICHT in D1, sondern als statisches Datenmodul "block-layers-data.js"
+//     (siehe eigene Datei) — einfach neben diese Datei legen und importieren.
+
+import { BLOCK_LAYERS } from "./block-layers-data.js";
 
 // ---------- Hilfsfunktionen ----------
 
@@ -142,11 +153,14 @@ function badgeFor(std) {
 }
 
 // ---------- Meta-Encoding ohne D1-Migration ----------
-// Ein kleines JSON-Objekt {erw, verb, ids} wird hinter einem unsichtbaren
-// Marker an ein vorhandenes Textfeld angehängt.
+// Ein kleines JSON-Objekt {erw, verb, ids, link, blk} wird hinter einem
+// unsichtbaren Marker an ein vorhandenes Textfeld angehängt.
 //   erw  = erwartete Sekunden (Zielzeit für den Countdown)
 //   verb = bereits verbrauchte Sekunden aus abgeschlossenen LAEUFT-Phasen
 //   ids  = Liste der User-IDs, die aktuell zugewiesen sind (Mehrfach-Zuweisung)
+//   link = optionaler Link (z. B. Bauplan/Video) — nur bei Aufgaben genutzt
+//   blk  = Nummer des verknüpften Litematica-Block-Layers — nur bei
+//          Stadion-Layern genutzt (0 = keine Verknüpfung)
 // Ist gar nichts davon gesetzt, bleibt das Feld unverändert/sauber.
 const META_MARK = "\u2063ZM\u2063";
 
@@ -155,14 +169,16 @@ function packMeta(baseText, meta) {
   const erw = Math.max(0, Math.round((meta && meta.erw) || 0));
   const verb = Math.max(0, Math.round((meta && meta.verb) || 0));
   const ids = Array.isArray(meta && meta.ids) ? [...new Set(meta.ids.map(Number).filter(Boolean))] : [];
-  if (!erw && !verb && !ids.length) return base;
-  return `${base}${META_MARK}${JSON.stringify({ erw, verb, ids })}`;
+  const link = meta && meta.link ? String(meta.link).trim().slice(0, 500) : "";
+  const blk = Math.max(0, Math.round((meta && meta.blk) || 0));
+  if (!erw && !verb && !ids.length && !link && !blk) return base;
+  return `${base}${META_MARK}${JSON.stringify({ erw, verb, ids, link, blk })}`;
 }
 
 function unpackMeta(text) {
   const raw = text || "";
   const idx = raw.indexOf(META_MARK);
-  if (idx === -1) return { base: raw, erw: 0, verb: 0, ids: [] };
+  if (idx === -1) return { base: raw, erw: 0, verb: 0, ids: [], link: "", blk: 0 };
   const base = raw.slice(0, idx);
   let m = {};
   try { m = JSON.parse(raw.slice(idx + META_MARK.length)); } catch { /* ignore */ }
@@ -171,6 +187,8 @@ function unpackMeta(text) {
     erw: Math.max(0, parseInt(m.erw) || 0),
     verb: Math.max(0, parseInt(m.verb) || 0),
     ids: Array.isArray(m.ids) ? m.ids.map(Number).filter(Boolean) : [],
+    link: typeof m.link === "string" ? m.link.slice(0, 500) : "",
+    blk: Math.max(0, parseInt(m.blk) || 0),
   };
 }
 
@@ -246,6 +264,7 @@ async function setTaskMeta(env, taskId, patch) {
     erw: patch.erw !== undefined ? patch.erw : cur.erw,
     verb: patch.verb !== undefined ? patch.verb : cur.verb,
     ids: patch.ids !== undefined ? patch.ids : cur.ids,
+    link: patch.link !== undefined ? patch.link : cur.link,
   };
   const notiz = packMeta("", merged);
   await env.DB.prepare("UPDATE tasks SET notiz = ? WHERE id = ?").bind(notiz, taskId).run();
@@ -283,6 +302,7 @@ async function setLayerMeta(env, layerId, patch) {
     erw: patch.erw !== undefined ? patch.erw : cur.erw,
     verb: patch.verb !== undefined ? patch.verb : cur.verb,
     ids: patch.ids !== undefined ? patch.ids : cur.ids,
+    blk: patch.blk !== undefined ? patch.blk : cur.blk,
   };
   const name = packMeta(merged.base, merged);
   await env.DB.prepare("UPDATE stadium_layers SET name = ? WHERE id = ?").bind(name, layerId).run();
@@ -307,16 +327,18 @@ async function isAssignedToLayer(env, layer, userId) {
 }
 
 // Hängt an eine Liste von Aufgaben/Layern die jeweilige assignees-Liste sowie die
-// (aus dem Meta-Feld dekodierte) erwartete/verbrauchte Zeit an.
+// (aus dem Meta-Feld dekodierte) erwartete/verbrauchte Zeit, den Link (Aufgaben)
+// bzw. die verknüpfte Block-Layer-Nummer (Stadion-Layer) an.
 async function attachTaskAssignees(env, tasks) {
   const out = [];
   for (const t of tasks) {
-    const { erw, verb, ids } = unpackMeta(t.notiz);
+    const { erw, verb, ids, link } = unpackMeta(t.notiz);
     out.push({
       ...t,
       assignees: await getUsersByIds(env, ids),
       erwartete_sekunden: erw,
       verbrauchte_sekunden: verb,
+      link: link || "",
     });
   }
   return out;
@@ -324,13 +346,14 @@ async function attachTaskAssignees(env, tasks) {
 async function attachLayerAssignees(env, layers) {
   const out = [];
   for (const l of layers) {
-    const { base, erw, verb, ids } = unpackMeta(l.name);
+    const { base, erw, verb, ids, blk } = unpackMeta(l.name);
     out.push({
       ...l,
       name: base,
       assignees: await getUsersByIds(env, ids),
       erwartete_sekunden: erw,
       verbrauchte_sekunden: verb,
+      blocklayer_nr: blk || 0,
     });
   }
   return out;
@@ -387,6 +410,20 @@ async function notifyAllActive(env, typ, titel, text, link, exceptUserId) {
 
 function sanitizeDateiname(name) {
   return String(name || "datei").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 180) || "datei";
+}
+
+// Prüft, ob eine vom Nutzer eingegebene Link-URL sinnvoll/sicher genug ist
+// (nur http/https zulassen, damit niemand z. B. "javascript:"-Links speichert).
+function sanitizeLink(raw) {
+  const val = (raw || "").toString().trim();
+  if (!val) return "";
+  try {
+    const u = new URL(val);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    return u.toString().slice(0, 500);
+  } catch {
+    return "";
+  }
 }
 
 // ---------- Router ----------
@@ -596,6 +633,14 @@ export async function onRequest(context) {
       return json({ users: results.map((u) => ({ ...u, avatar: avatarFor(u) })) });
     }
 
+    // ---- BLOCKLISTEN AUS DEM LITEMATICA-BAUPLAN ----
+    // Statische Daten aus block-layers-data.js (kein D1 nötig). Jeder Eintrag:
+    // { nr, y, total, blocks: [{ id, label, count }, ...] }
+
+    if (path === "/block-layers" && method === "GET") {
+      return json({ layers: BLOCK_LAYERS });
+    }
+
     // ---- RÄNGE ----
 
     if (path === "/ranks" && method === "GET") {
@@ -671,7 +716,7 @@ export async function onRequest(context) {
     }
 
     if (path === "/tasks" && method === "POST") {
-      const { titel, prioritaet, zustaendig_user_id, zustaendig_user_ids, punkte } = body;
+      const { titel, prioritaet, zustaendig_user_id, zustaendig_user_ids, punkte, link } = body;
       if (!titel || !titel.trim()) return err("Aufgabentitel fehlt.");
 
       let ids = Array.isArray(zustaendig_user_ids) ? zustaendig_user_ids.map((x) => Number(x)).filter(Boolean) : [];
@@ -697,8 +742,9 @@ export async function onRequest(context) {
 
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
       const erwSek = Math.max(0, parseInt(body.erwartete_minuten) || 0) * 60;
-      // Erwartete Zeit UND Zuweisungs-IDs direkt in einem Schritt ins "notiz"-Feld packen.
-      const notizWert = packMeta("", { erw: erwSek, verb: 0, ids: assignedTargets.map((t) => t.id) });
+      const linkWert = sanitizeLink(link);
+      // Erwartete Zeit, Zuweisungs-IDs UND Link direkt in einem Schritt ins "notiz"-Feld packen.
+      const notizWert = packMeta("", { erw: erwSek, verb: 0, ids: assignedTargets.map((t) => t.id), link: linkWert });
 
       const res = await env.DB.prepare(
         `INSERT INTO tasks (titel, zustaendig_user_id, zustaendig_name, zugewiesen_von, status, prioritaet, notiz, erstellt_am, erstellt_von, punkte)
@@ -723,7 +769,7 @@ export async function onRequest(context) {
 
     // Admin/Berechtigte können eine Aufgabe JEDERZEIT neu zuweisen — auch wenn
     // bereits jemand zugewiesen ist oder sie freiwillig angenommen wurde. Die
-    // erwartete/verbrauchte Zeit im Meta-Feld bleibt dabei unangetastet erhalten.
+    // erwartete/verbrauchte Zeit UND der Link im Meta-Feld bleiben dabei unangetastet erhalten.
     const taskAssignMatch = path.match(/^\/tasks\/(\d+)\/zuweisen$/);
     if (taskAssignMatch && method === "POST") {
       if (!canAssign) return err("Keine Berechtigung.", 403);
@@ -760,6 +806,18 @@ export async function onRequest(context) {
         );
       }
       return json({ ok: true });
+    }
+
+    // Admin/Berechtigte können den Link einer Aufgabe nachträglich ändern/entfernen.
+    const taskLinkMatch = path.match(/^\/tasks\/(\d+)\/link$/);
+    if (taskLinkMatch && method === "POST") {
+      if (!canAssign) return err("Keine Berechtigung.", 403);
+      const id = taskLinkMatch[1];
+      const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(id).first();
+      if (!task) return err("Aufgabe nicht gefunden.", 404);
+      const linkWert = sanitizeLink(body.link);
+      await setTaskMeta(env, id, { link: linkWert });
+      return json({ ok: true, link: linkWert });
     }
 
     const taskAcceptMatch = path.match(/^\/tasks\/(\d+)\/annehmen$/);
@@ -819,7 +877,7 @@ export async function onRequest(context) {
       const { verb } = unpackMeta(task.notiz);
       const zusatz = task.start_zeit ? Math.max(0, (Date.now() - new Date(task.start_zeit).getTime()) / 1000) : 0;
       const neuerVerb = Math.round(verb + zusatz);
-      // setTaskMeta lässt "erw" und "ids" unangetastet, ändert nur "verb".
+      // setTaskMeta lässt "erw", "ids" und "link" unangetastet, ändert nur "verb".
       await setTaskMeta(env, id, { verb: neuerVerb });
       await env.DB.prepare("UPDATE tasks SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
@@ -971,7 +1029,7 @@ export async function onRequest(context) {
 
     if (path === "/stadion/layers" && method === "POST") {
       if (!canAssign) return err("Keine Berechtigung, Stadion-Layer anzulegen.", 403);
-      const { name, punkte, zustaendig_user_id, zustaendig_user_ids } = body;
+      const { name, punkte, zustaendig_user_id, zustaendig_user_ids, blocklayer_nr } = body;
       if (!name || !name.trim()) return err("Name der Layer fehlt.");
       const maxRow = await env.DB.prepare("SELECT COALESCE(MAX(layer_nr),0) AS m FROM stadium_layers").first();
       const nr = (maxRow.m || 0) + 1;
@@ -995,8 +1053,12 @@ export async function onRequest(context) {
       }
       const pkt = user.is_admin ? Math.max(0, parseInt(punkte) || 0) : 0;
       const erwSek = Math.max(0, parseInt(body.erwartete_minuten) || 0) * 60;
-      // Erwartete Zeit UND Zuweisungs-IDs direkt in einem Schritt hinter den Layer-Namen packen.
-      const nameWert = packMeta(name.trim(), { erw: erwSek, verb: 0, ids: assignedTargets.map((t) => t.id) });
+      // Gültigkeit der Block-Layer-Nummer prüfen (muss in BLOCK_LAYERS existieren).
+      const blkWunsch = Math.max(0, parseInt(blocklayer_nr) || 0);
+      const blk = blkWunsch && BLOCK_LAYERS.some((bl) => bl.nr === blkWunsch) ? blkWunsch : 0;
+      // Erwartete Zeit, Zuweisungs-IDs UND Block-Layer-Verknüpfung direkt in einem
+      // Schritt hinter den Layer-Namen packen.
+      const nameWert = packMeta(name.trim(), { erw: erwSek, verb: 0, ids: assignedTargets.map((t) => t.id), blk });
 
       const res = await env.DB.prepare(
         `INSERT INTO stadium_layers (layer_nr, name, status, zustaendig_user_id, zustaendig_name, zugewiesen_von, punkte, erstellt_am, erstellt_von)
@@ -1020,7 +1082,8 @@ export async function onRequest(context) {
     }
 
     // Admin/Berechtigte können eine Layer JEDERZEIT neu zuweisen — auch wenn
-    // bereits jemand zugewiesen ist. Erwartete/verbrauchte Zeit bleibt erhalten.
+    // bereits jemand zugewiesen ist. Erwartete/verbrauchte Zeit und die
+    // Block-Layer-Verknüpfung bleiben erhalten.
     const layerAssignMatch = path.match(/^\/stadion\/layers\/(\d+)\/zuweisen$/);
     if (layerAssignMatch && method === "POST") {
       if (!canAssign) return err("Keine Berechtigung.", 403);
@@ -1053,6 +1116,20 @@ export async function onRequest(context) {
       return json({ ok: true });
     }
 
+    // Admin/Berechtigte können die verknüpfte Litematica-Blockliste einer
+    // bestehenden Layer jederzeit ändern oder entfernen (blocklayer_nr = 0).
+    const layerBlockLinkMatch = path.match(/^\/stadion\/layers\/(\d+)\/blockliste$/);
+    if (layerBlockLinkMatch && method === "POST") {
+      if (!canAssign) return err("Keine Berechtigung.", 403);
+      const id = layerBlockLinkMatch[1];
+      const layer = await env.DB.prepare("SELECT * FROM stadium_layers WHERE id = ?").bind(id).first();
+      if (!layer) return err("Layer nicht gefunden.", 404);
+      const blkWunsch = Math.max(0, parseInt(body.blocklayer_nr) || 0);
+      const blk = blkWunsch && BLOCK_LAYERS.some((bl) => bl.nr === blkWunsch) ? blkWunsch : 0;
+      await setLayerMeta(env, id, { blk });
+      return json({ ok: true, blocklayer_nr: blk });
+    }
+
     const layerStartMatch = path.match(/^\/stadion\/layers\/(\d+)\/start$/);
     if (layerStartMatch && method === "POST") {
       const id = layerStartMatch[1];
@@ -1077,7 +1154,7 @@ export async function onRequest(context) {
       const { verb } = unpackMeta(layer.name);
       const zusatz = layer.start_zeit ? Math.max(0, (Date.now() - new Date(layer.start_zeit).getTime()) / 1000) : 0;
       const neuerVerb = Math.round(verb + zusatz);
-      // setLayerMeta lässt "base" (Layer-Name), "erw" und "ids" unangetastet, ändert nur "verb".
+      // setLayerMeta lässt "base" (Layer-Name), "erw", "ids" und "blk" unangetastet, ändert nur "verb".
       await setLayerMeta(env, id, { verb: neuerVerb });
       await env.DB.prepare("UPDATE stadium_layers SET status = 'PAUSIERT' WHERE id = ?").bind(id).run();
       return json({ ok: true });
