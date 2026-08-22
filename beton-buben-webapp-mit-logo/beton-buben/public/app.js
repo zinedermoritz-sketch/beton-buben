@@ -422,8 +422,8 @@ async function boot() {
   ensureAssignmentStyles();
   ensureBloeckeTab();
   ensureZeitstrahlTab();
-  ensureVorschlaegeTab();
   ensurePlanTab();
+  removeRetiredTabs();
   ensureTabEmojis();
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -451,6 +451,7 @@ async function boot() {
     state.me = await api("/me");
     $topbar.hidden = false;
     applyTabVisibility();
+    if (state.view === "gruppen" || state.view === "vorschlaege") state.view = "dashboard";
     render();
     startNotifPolling();
   } catch {
@@ -482,17 +483,6 @@ function ensureZeitstrahlTab() {
   $tabs.appendChild(btn);
 }
 
-// Fügt den "💡 Vorschläge"-Tab-Button dynamisch neben den bestehenden Tabs ein.
-// Jeder kann dort Vorschläge einreichen, der Admin nimmt an oder lehnt ab.
-function ensureVorschlaegeTab() {
-  if (!$tabs || document.querySelector('[data-view="vorschlaege"]')) return;
-  const btn = document.createElement("button");
-  btn.className = "tab";
-  btn.dataset.view = "vorschlaege";
-  btn.textContent = "💡 Vorschläge";
-  $tabs.appendChild(btn);
-}
-
 // Fügt den "📋 3-Tage-Plan"-Tab-Button dynamisch neben den bestehenden Tabs ein.
 // Ersetzt den früheren PDF-Download auf der Startseite durch eine direkt
 // lesbare, schön formatierte Übersicht.
@@ -505,6 +495,14 @@ function ensurePlanTab() {
   $tabs.appendChild(btn);
 }
 
+// Entfernt die abgeschafften Tabs „Bau-Gruppen" und „Vorschläge" komplett aus
+// der Tab-Leiste — unabhängig davon, ob sie fest in der index.html stehen
+// oder früher dynamisch erzeugt wurden. Die zugehörigen render*()-Funktionen
+// und Backend-Routen wurden ebenfalls entfernt.
+function removeRetiredTabs() {
+  document.querySelectorAll('[data-view="gruppen"], [data-view="vorschlaege"]').forEach((btn) => btn.remove());
+}
+
 // Beschriftungen (inkl. Emoji links vor dem Namen) für alle Abteilungen/Tabs.
 // Wird einmalig beim Boot über die vorhandenen Tab-Buttons gelegt — so muss
 // die index.html nicht angepasst werden, egal welchen Text sie ursprünglich hatte.
@@ -515,9 +513,7 @@ const TAB_LABELS = {
   bloecke: "🧱 Blöcke",
   zeitstrahl: "🕒 Zeitstrahl",
   shop: "🛒 Shop",
-  gruppen: "👷 Gruppen",
   kalender: "📅 Kalender",
-  vorschlaege: "💡 Vorschläge",
   plan3tage: "📋 3-Tage-Plan",
   dateien: "📎 Dateien",
   zeitlog: "🕓 Zeitlog",
@@ -587,7 +583,7 @@ async function loadNotifPanel() {
 }
 
 function notifIcon(typ) {
-  return { AUFGABE_ZUGEWIESEN: "📋", AUFGABE_ERLEDIGT: "✅", LAYER_ZUGEWIESEN: "🏟️", LAYER_FERTIG: "🧱", SHOP_KAUF: "🛒", SHOP_ERLEDIGT: "🎁", EVENT_NEU: "📅", DATEI_NEU: "📎", PUNKTE_GUTSCHRIFT: "🪙", VORSCHLAG_NEU: "💡", VORSCHLAG_ENTSCHIEDEN: "💡" }[typ] || "🔔";
+  return { AUFGABE_ZUGEWIESEN: "📋", AUFGABE_ERLEDIGT: "✅", LAYER_ZUGEWIESEN: "🏟️", LAYER_FERTIG: "🧱", SHOP_KAUF: "🛒", SHOP_ERLEDIGT: "🎁", EVENT_NEU: "📅", DATEI_NEU: "📎", PUNKTE_GUTSCHRIFT: "🪙" }[typ] || "🔔";
 }
 
 function updateNotifBadge(count) {
@@ -753,9 +749,7 @@ function render() {
     bloecke: renderBloecke,
     zeitstrahl: renderZeitstrahl,
     shop: renderShop,
-    gruppen: renderGruppen,
     kalender: renderKalender,
-    vorschlaege: renderVorschlaege,
     plan3tage: renderPlan3Tage,
     dateien: renderDateien,
     zeitlog: renderZeitlog,
@@ -815,6 +809,12 @@ function miniStatsRowHtml(me) {
 // heutigen Zeitstrahl-Mini-Panel gerade etwas läuft, siehe unten). Dabei wird
 // NICHT zuerst der "Lade Baustelle …"-Platzhalter angezeigt — genau das war
 // der Grund für das kurze Aufblitzen/Flackern der Seite alle paar Sekunden.
+//
+// Reihenfolge der Panels wurde bewusst so gewählt, dass auf einem normalen
+// Desktop-Monitor (ohne Scrollen) direkt sichtbar sind: Mini-Statistik-Leiste,
+// offene Aufgaben/Layer + On/Off-Schalter, sowie Zeitstrahl + Baufortschritt.
+// "Meine Layer in Arbeit" ist jetzt Teil derselben Karte wie "Aufgaben in
+// Arbeit" — sobald dir eine Layer zugewiesen wird, erscheint sie dort mit.
 async function renderDashboard(opts = {}) {
   const silent = opts.silent === true;
 
@@ -854,8 +854,10 @@ async function renderDashboard(opts = {}) {
 
     <div class="grid grid-2">
       <div class="panel">
-        <h2>Aufgaben in Arbeit</h2>
-        ${meineAufgaben.length ? `<ul class="task-list">${meineAufgaben.map(dashboardTaskHtml).join("")}</ul>` : `<div class="empty">Keine offenen Aufgaben — schau bei „Aufgaben" vorbei.</div>`}
+        <h2>📋 Aufgaben & Layer in Arbeit</h2>
+        ${(meineAufgaben.length || meineLayer.length)
+          ? `<ul class="task-list">${meineAufgaben.map(dashboardTaskHtml).join("")}${meineLayer.map(dashboardLayerHtml).join("")}</ul>`
+          : `<div class="empty">Keine offenen Aufgaben oder Layer — schau bei „Aufgaben" oder „Stadion" vorbei.</div>`}
       </div>
 
       <div class="panel switch-panel">
@@ -866,26 +868,23 @@ async function renderDashboard(opts = {}) {
       </div>
     </div>
 
-    <div class="panel">
-      <h2>🏗️ Meine Layer in Arbeit</h2>
-      ${meineLayer.length ? `<ul class="task-list">${meineLayer.map(dashboardLayerHtml).join("")}</ul>` : `<div class="empty">Dir sind aktuell keine Stadion-Layer zugewiesen.</div>`}
-    </div>
-
-    <div class="panel">
-      <div class="toolbar" style="margin-bottom:2px;">
-        <h2 style="margin:0;">🕒 Heutiger Zeitstrahl</h2>
-        <button type="button" class="btn small secondary" data-goto-zeitstrahl>Ganzer Zeitstrahl ▶</button>
+    <div class="grid grid-2">
+      <div class="panel">
+        <div class="toolbar" style="margin-bottom:2px;">
+          <h2 style="margin:0;">🕒 Heutiger Zeitstrahl</h2>
+          <button type="button" class="btn small secondary" data-goto-zeitstrahl>Ganzer Zeitstrahl ▶</button>
+        </div>
+        <div class="subtitle" style="margin:6px 0 0;">${fmtDatumKurz(heutigDatum)}</div>
+        ${zeitstrahlTimelineHtml(heutigeItems, true)}
       </div>
-      <div class="subtitle" style="margin:6px 0 0;">${fmtDatumKurz(heutigDatum)}</div>
-      ${zeitstrahlTimelineHtml(heutigeItems, true)}
-    </div>
 
-    <div class="panel overview-progress-panel">
-      <h2>🏗️ Baufortschritt</h2>
-      <div class="stadium-progress-wrap">
-        <div class="stadium-progress-count">${fertigeLayer} von ${layerGesamt} Layern fertig</div>
-        <div class="stadium-progress"><div class="stadium-progress-fill" style="width:${layerProzent}%"></div></div>
-        <div class="stadium-progress-percent">${layerProzent}%</div>
+      <div class="panel overview-progress-panel">
+        <h2>🏗️ Baufortschritt</h2>
+        <div class="stadium-progress-wrap">
+          <div class="stadium-progress-count">${fertigeLayer} von ${layerGesamt} Layern fertig</div>
+          <div class="stadium-progress"><div class="stadium-progress-fill" style="width:${layerProzent}%"></div></div>
+          <div class="stadium-progress-percent">${layerProzent}%</div>
+        </div>
       </div>
     </div>
 
@@ -1742,84 +1741,6 @@ function shopItemHtml(i) {
   </div>`;
 }
 
-// ---------- Bau-Gruppen ----------
-
-async function renderGruppen() {
-  $app.innerHTML = `<div class="empty">Lade Gruppen …</div>`;
-  const canAssign = state.me.is_admin || state.me.kann_aufgaben_zuweisen;
-  const [{ gruppen }, spieler] = await Promise.all([api("/gruppen"), api("/users/active")]);
-
-  $app.innerHTML = `
-    <h1>👷 Bau-Gruppen</h1>
-    <div class="subtitle">Teile die Crew in Trupps ein — praktisch für Zuständigkeiten am Stadion.</div>
-
-    ${canAssign ? `
-    <div class="panel">
-      <h2>Neue Gruppe anlegen</h2>
-      <form id="gruppeForm" class="task-form">
-        <input type="text" name="name" placeholder="z. B. Gerüstbau-Trupp" required />
-        <input type="text" name="beschreibung" placeholder="Beschreibung (optional)" style="flex:1;min-width:180px;" />
-        <input type="color" name="farbe" value="#5f8fc4" />
-        <button class="btn small" type="submit">Gruppe anlegen</button>
-      </form>
-    </div>` : ""}
-
-    <div class="grid grid-2">
-      ${gruppen.length ? gruppen.map((g) => gruppeCardHtml(g, spieler.users, canAssign)).join("") : `<div class="empty">Noch keine Gruppen angelegt.</div>`}
-    </div>
-  `;
-
-  if (canAssign) {
-    document.getElementById("gruppeForm").onsubmit = async (e) => {
-      e.preventDefault();
-      const f = new FormData(e.target);
-      try {
-        await api("/gruppen", { method: "POST", body: JSON.stringify({ name: f.get("name"), beschreibung: f.get("beschreibung"), farbe: f.get("farbe") }) });
-        renderGruppen();
-      } catch (err) { alert(err.message); }
-    };
-    document.querySelectorAll("[data-gruppedel]").forEach((b) => b.onclick = async () => {
-      if (!state.me.is_admin) { alert("Nur der Admin kann Gruppen löschen."); return; }
-      if (!confirm("Gruppe wirklich löschen?")) return;
-      try { await api(`/gruppen/${b.dataset.gruppedel}`, { method: "DELETE" }); renderGruppen(); } catch (e) { alert(e.message); }
-    });
-    document.querySelectorAll("[data-addmember]").forEach((sel) => sel.onchange = async () => {
-      if (!sel.value) return;
-      try { await api(`/gruppen/${sel.dataset.addmember}/mitglieder`, { method: "POST", body: JSON.stringify({ user_id: Number(sel.value) }) }); renderGruppen(); }
-      catch (e) { alert(e.message); }
-    });
-    document.querySelectorAll("[data-removemember]").forEach((b) => b.onclick = async () => {
-      try { await api(`/gruppen/${b.dataset.gruppe}/mitglieder/${b.dataset.removemember}`, { method: "DELETE" }); renderGruppen(); }
-      catch (e) { alert(e.message); }
-    });
-  }
-}
-
-function gruppeCardHtml(g, alleSpieler, canAssign) {
-  const mitgliederIds = new Set(g.mitglieder.map((m) => m.id));
-  const verfuegbar = alleSpieler.filter((u) => !mitgliederIds.has(u.id));
-  return `<div class="panel gruppe-card">
-    <div class="gruppe-head">
-      <span class="rank-chip" style="border-color:${g.farbe};color:${g.farbe}">${escapeHtml(g.name)}</span>
-      ${canAssign ? `<button class="btn small secondary" data-gruppedel="${g.id}">🗑</button>` : ""}
-    </div>
-    ${g.beschreibung ? `<div class="subtitle" style="margin:8px 0;">${escapeHtml(g.beschreibung)}</div>` : ""}
-    <div class="gruppe-members">
-      ${g.mitglieder.length ? g.mitglieder.map((m) => `
-        <div class="gruppe-member">
-          ${avatarHtml(m.avatar, 26)}
-          <span>${escapeHtml(m.vorname)} ${escapeHtml(m.nachname)}</span>
-          ${canAssign ? `<button class="ghost-btn tiny" data-gruppe="${g.id}" data-removemember="${m.id}">✕</button>` : ""}
-        </div>`).join("") : `<div class="empty" style="padding:8px 0;">Noch keine Mitglieder.</div>`}
-    </div>
-    ${canAssign && verfuegbar.length ? `
-    <select class="select-dark" data-addmember="${g.id}" style="margin-top:10px;width:100%;">
-      <option value="">+ Mitglied hinzufügen …</option>
-      ${verfuegbar.map((u) => `<option value="${u.id}">${escapeHtml(u.vorname)} ${escapeHtml(u.nachname)}</option>`).join("")}
-    </select>` : ""}
-  </div>`;
-}
-
 // ---------- Kalender ----------
 
 async function renderKalender() {
@@ -1925,82 +1846,6 @@ function kalenderItemHtml(e) {
     ${kalenderDauerBadgeHtml(e)}
     <div class="kalender-meta">von ${escapeHtml(e.ersteller_name || "?")}</div>
   </div>`;
-}
-
-// ---------- Vorschläge ----------
-// Jeder angemeldete Nutzer kann einen Vorschlag einreichen, der Admin nimmt an
-// oder lehnt ab. Vorher fehlten die passenden Backend-Endpunkte komplett,
-// weshalb dieser Tab dauerhaft bei "Lade Vorschläge …" hängen blieb — jetzt
-// ergänzt (siehe path.js: GET/POST /vorschlaege, POST .../entscheiden, DELETE).
-
-async function renderVorschlaege() {
-  $app.innerHTML = `<div class="empty">Lade Vorschläge …</div>`;
-  try {
-    const { vorschlaege } = await api("/vorschlaege");
-    const offen = vorschlaege.filter((v) => v.status === "OFFEN");
-    const entschieden = vorschlaege.filter((v) => v.status !== "OFFEN");
-
-    $app.innerHTML = `
-      <h1>💡 Vorschläge</h1>
-      <div class="subtitle">Jeder kann einen Vorschlag einreichen — der Admin entscheidet, ob er umgesetzt wird.</div>
-
-      <div class="panel">
-        <h2>Neuen Vorschlag einreichen</h2>
-        <form id="vorschlagForm" class="task-form" style="flex-wrap:wrap;">
-          <input type="text" name="titel" placeholder="Worum geht's?" required style="flex:1;min-width:200px;" />
-          <input type="text" name="beschreibung" placeholder="Beschreibung (optional)" style="flex:2;min-width:220px;" />
-          <button class="btn small" type="submit">Einreichen</button>
-        </form>
-      </div>
-
-      <div class="panel">
-        <h2>Offene Vorschläge (${offen.length})</h2>
-        ${offen.length ? `<ul class="task-list">${offen.map((v) => vorschlagItemHtml(v, state.me.is_admin)).join("")}</ul>` : `<div class="empty">Aktuell keine offenen Vorschläge.</div>`}
-      </div>
-
-      ${entschieden.length ? `
-      <div class="panel">
-        <h2>Entschiedene Vorschläge</h2>
-        <ul class="task-list">${entschieden.map((v) => vorschlagItemHtml(v, state.me.is_admin)).join("")}</ul>
-      </div>` : ""}
-    `;
-
-    document.getElementById("vorschlagForm").onsubmit = async (e) => {
-      e.preventDefault();
-      const f = new FormData(e.target);
-      try {
-        await api("/vorschlaege", { method: "POST", body: JSON.stringify({ titel: f.get("titel"), beschreibung: f.get("beschreibung") }) });
-        renderVorschlaege();
-      } catch (err) { alert(err.message); }
-    };
-
-    document.querySelectorAll("[data-vaccept]").forEach((b) => b.onclick = async () => {
-      try { await api(`/vorschlaege/${b.dataset.vaccept}/entscheiden`, { method: "POST", body: JSON.stringify({ status: "ANGENOMMEN" }) }); renderVorschlaege(); }
-      catch (e) { alert(e.message); }
-    });
-    document.querySelectorAll("[data-vreject]").forEach((b) => b.onclick = async () => {
-      try { await api(`/vorschlaege/${b.dataset.vreject}/entscheiden`, { method: "POST", body: JSON.stringify({ status: "ABGELEHNT" }) }); renderVorschlaege(); }
-      catch (e) { alert(e.message); }
-    });
-    document.querySelectorAll("[data-vdelete]").forEach((b) => b.onclick = async () => {
-      if (!confirm("Vorschlag wirklich löschen?")) return;
-      try { await api(`/vorschlaege/${b.dataset.vdelete}`, { method: "DELETE" }); renderVorschlaege(); }
-      catch (e) { alert(e.message); }
-    });
-  } catch (err) {
-    $app.innerHTML = `<div class="empty">Vorschläge konnten nicht geladen werden: ${escapeHtml(err.message)}</div>`;
-  }
-}
-
-function vorschlagItemHtml(v, isAdmin) {
-  const statusLabel = { OFFEN: "⏳ Offen", ANGENOMMEN: "✅ Angenommen", ABGELEHNT: "❌ Abgelehnt" }[v.status] || v.status;
-  const kannLoeschen = isAdmin || v.erstellt_von === state.me.id;
-  return `<li class="task-item">
-    <span class="titel">${escapeHtml(v.titel)}${v.beschreibung ? `<div class="task-meta">${nl2br(escapeHtml(v.beschreibung))}</div>` : ""}<div class="task-meta">von ${escapeHtml(v.ersteller_name || "?")} · ${fmtDate(v.erstellt_am)}</div></span>
-    <span class="status-pill">${statusLabel}</span>
-    ${isAdmin && v.status === "OFFEN" ? `<button class="btn small" data-vaccept="${v.id}">✅ Annehmen</button> <button class="btn small secondary" data-vreject="${v.id}">❌ Ablehnen</button>` : ""}
-    ${kannLoeschen ? `<button class="btn small secondary" data-vdelete="${v.id}">🗑</button>` : ""}
-  </li>`;
 }
 
 // ---------- Plan für die ersten drei Tage ----------
