@@ -41,15 +41,12 @@
 //   /plan3tage weiter unten. Auch diese Tabelle wird beim ersten Zugriff
 //   automatisch angelegt, keine manuelle D1-Migration nötig.
 //
-// NEU (Vorschläge-Route ergänzt):
-//   Das Frontend hatte bereits einen kompletten "💡 Vorschläge"-Tab
-//   (GET/POST /vorschlaege, POST /vorschlaege/:id/entscheiden,
-//   DELETE /vorschlaege/:id), aber im Backend fehlten die passenden
-//   Endpunkte komplett — dadurch lief jede Anfrage ins Leere (404) und der
-//   Tab blieb für immer bei "Lade Vorschläge …" hängen. Behoben, inkl.
-//   automatischer Tabellenerstellung (vorschlaege) beim ersten Zugriff,
-//   genau wie bei plan_3tage/schematic_platzierung — keine manuelle
-//   D1-Migration nötig.
+// ENTFERNT (Bau-Gruppen & Vorschläge):
+//   Die Tabs "👷 Gruppen" und "💡 Vorschläge" wurden auf Wunsch komplett aus
+//   der App entfernt — inklusive aller zugehörigen Backend-Routen unten
+//   (/gruppen*, /vorschlaege*). Die D1-Tabellen bau_gruppen /
+//   bau_gruppen_mitglieder bleiben unangetastet in der Datenbank bestehen
+//   (keine Migration nötig), werden aber von der App nicht mehr angesprochen.
 
 import { BLOCK_LAYERS } from "./block-layers-data.js";
 
@@ -512,25 +509,6 @@ Zidinator: AFK-Eisenfarm + Chunkloader bei der Froglight-Farm
 Totems schnorren — Gabriel/Florian (egal wer)
 Maze bauen + Windburst II besorgen
 Farmen + Bauen den ganzen Tag — Hauptziel`;
-
-// ---------- Vorschläge ----------
-// Eine einfache Tabelle für den "💡 Vorschläge"-Tab: jeder Nutzer kann einen
-// Vorschlag einreichen, der Admin nimmt an oder lehnt ab. Wird beim ersten
-// Zugriff automatisch angelegt (keine manuelle D1-Migration nötig), genau
-// wie bei plan_3tage/schematic_platzierung oben.
-async function ensureVorschlaegeTable(env) {
-  await env.DB.exec(
-    `CREATE TABLE IF NOT EXISTS vorschlaege (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      titel TEXT,
-      beschreibung TEXT,
-      status TEXT,
-      erstellt_von INTEGER,
-      ersteller_name TEXT,
-      erstellt_am TEXT
-    )`
-  );
-}
 
 // ---------- Benachrichtigungen ----------
 
@@ -1457,63 +1435,6 @@ export async function onRequest(context) {
       return json({ ok: true });
     }
 
-    // ---- BAU-GRUPPEN ----
-
-    if (path === "/gruppen" && method === "GET") {
-      const { results: gruppen } = await env.DB.prepare("SELECT * FROM bau_gruppen ORDER BY name ASC").all();
-      const out = [];
-      for (const g of gruppen) {
-        const { results: mitglieder } = await env.DB.prepare(
-          `SELECT u.id, u.vorname, u.nachname, u.gamertag, u.avatar FROM bau_gruppen_mitglieder m
-           JOIN users u ON u.id = m.user_id WHERE m.gruppe_id = ? ORDER BY u.vorname`
-        ).bind(g.id).all();
-        out.push({ ...g, mitglieder: mitglieder.map((m) => ({ ...m, avatar: avatarFor(m) })) });
-      }
-      return json({ gruppen: out });
-    }
-
-    if (path === "/gruppen" && method === "POST") {
-      if (!canAssign) return err("Keine Berechtigung, Gruppen anzulegen.", 403);
-      const { name, farbe, beschreibung } = body;
-      if (!name || !name.trim()) return err("Gruppenname fehlt.");
-      const existing = await env.DB.prepare("SELECT id FROM bau_gruppen WHERE name = ?").bind(name.trim()).first();
-      if (existing) return err("Diese Gruppe existiert bereits.");
-      const res = await env.DB.prepare(
-        `INSERT INTO bau_gruppen (name, farbe, beschreibung, erstellt_von, erstellt_am) VALUES (?, ?, ?, ?, ?)`
-      )
-        .bind(name.trim(), farbe || "#5f8fc4", (beschreibung || "").trim(), user.id, nowIso())
-        .run();
-      return json({ id: res.meta.last_row_id });
-    }
-
-    const gruppeDeleteMatch = path.match(/^\/gruppen\/(\d+)$/);
-    if (gruppeDeleteMatch && method === "DELETE") {
-      if (!user.is_admin) return err("Nur für Admins.", 403);
-      const id = gruppeDeleteMatch[1];
-      await env.DB.prepare("DELETE FROM bau_gruppen_mitglieder WHERE gruppe_id = ?").bind(id).run();
-      await env.DB.prepare("DELETE FROM bau_gruppen WHERE id = ?").bind(id).run();
-      return json({ ok: true });
-    }
-
-    const gruppeAddMatch = path.match(/^\/gruppen\/(\d+)\/mitglieder$/);
-    if (gruppeAddMatch && method === "POST") {
-      if (!canAssign) return err("Keine Berechtigung.", 403);
-      const gruppeId = gruppeAddMatch[1];
-      const { user_id } = body;
-      const target = await env.DB.prepare("SELECT id FROM users WHERE id = ? AND aktiv = 1 AND freigegeben = 1").bind(user_id).first();
-      if (!target) return err("Spieler nicht gefunden.", 404);
-      await env.DB.prepare("INSERT OR IGNORE INTO bau_gruppen_mitglieder (gruppe_id, user_id) VALUES (?, ?)").bind(gruppeId, target.id).run();
-      return json({ ok: true });
-    }
-
-    const gruppeRemoveMatch = path.match(/^\/gruppen\/(\d+)\/mitglieder\/(\d+)$/);
-    if (gruppeRemoveMatch && method === "DELETE") {
-      if (!canAssign) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("DELETE FROM bau_gruppen_mitglieder WHERE gruppe_id = ? AND user_id = ?")
-        .bind(gruppeRemoveMatch[1], gruppeRemoveMatch[2]).run();
-      return json({ ok: true });
-    }
-
     // ---- KALENDER ----
 
     if (path === "/kalender" && method === "GET") {
@@ -1597,72 +1518,6 @@ export async function onRequest(context) {
       )
         .bind(id, user.id, antwort, meName)
         .run();
-      return json({ ok: true });
-    }
-
-    // ---- VORSCHLÄGE ----
-    // Jeder angemeldete Nutzer kann einen Vorschlag einreichen, der Admin
-    // entscheidet über "annehmen"/"ablehnen". Tabelle wird beim ersten
-    // Zugriff automatisch angelegt.
-
-    if (path === "/vorschlaege" && method === "GET") {
-      await ensureVorschlaegeTable(env);
-      const { results } = await env.DB.prepare(
-        "SELECT * FROM vorschlaege ORDER BY (status = 'OFFEN') DESC, id DESC LIMIT 300"
-      ).all();
-      return json({ vorschlaege: results });
-    }
-
-    if (path === "/vorschlaege" && method === "POST") {
-      await ensureVorschlaegeTable(env);
-      const { titel, beschreibung } = body;
-      if (!titel || !titel.trim()) return err("Titel fehlt.");
-      const res = await env.DB.prepare(
-        `INSERT INTO vorschlaege (titel, beschreibung, status, erstellt_von, ersteller_name, erstellt_am)
-         VALUES (?, ?, 'OFFEN', ?, ?, ?)`
-      )
-        .bind(titel.trim(), (beschreibung || "").trim(), user.id, meName, nowIso())
-        .run();
-      await notifyAdmins(
-        env,
-        "VORSCHLAG_NEU",
-        "Neuer Vorschlag",
-        `${meName} hat einen Vorschlag eingereicht: „${titel.trim()}"`,
-        "vorschlaege",
-        user.id
-      );
-      return json({ id: res.meta.last_row_id });
-    }
-
-    const vorschlagDecideMatch = path.match(/^\/vorschlaege\/(\d+)\/entscheiden$/);
-    if (vorschlagDecideMatch && method === "POST") {
-      if (!user.is_admin) return err("Nur für Admins.", 403);
-      await ensureVorschlaegeTable(env);
-      const id = vorschlagDecideMatch[1];
-      const v = await env.DB.prepare("SELECT * FROM vorschlaege WHERE id = ?").bind(id).first();
-      if (!v) return err("Vorschlag nicht gefunden.", 404);
-      const status = body.status === "ANGENOMMEN" ? "ANGENOMMEN" : body.status === "ABGELEHNT" ? "ABGELEHNT" : null;
-      if (!status) return err("Ungültiger Status.");
-      await env.DB.prepare("UPDATE vorschlaege SET status = ? WHERE id = ?").bind(status, id).run();
-      await notify(
-        env,
-        v.erstellt_von,
-        "VORSCHLAG_ENTSCHIEDEN",
-        status === "ANGENOMMEN" ? "Vorschlag angenommen" : "Vorschlag abgelehnt",
-        `Dein Vorschlag „${v.titel}" wurde ${status === "ANGENOMMEN" ? "angenommen ✅" : "abgelehnt ❌"}.`,
-        "vorschlaege"
-      );
-      return json({ ok: true });
-    }
-
-    const vorschlagDeleteMatch = path.match(/^\/vorschlaege\/(\d+)$/);
-    if (vorschlagDeleteMatch && method === "DELETE") {
-      await ensureVorschlaegeTable(env);
-      const id = vorschlagDeleteMatch[1];
-      const v = await env.DB.prepare("SELECT * FROM vorschlaege WHERE id = ?").bind(id).first();
-      if (!v) return err("Vorschlag nicht gefunden.", 404);
-      if (!user.is_admin && v.erstellt_von !== user.id) return err("Keine Berechtigung.", 403);
-      await env.DB.prepare("DELETE FROM vorschlaege WHERE id = ?").bind(id).run();
       return json({ ok: true });
     }
 
