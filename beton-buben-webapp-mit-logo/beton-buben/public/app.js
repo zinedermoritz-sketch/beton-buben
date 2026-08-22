@@ -55,6 +55,16 @@ function fmtClock(ms) {
   const ss = String(s % 60).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
 }
+// Countdown-Formatierung für die erwartete Zeit einer Aufgabe: zählt ab dem
+// erwarteten Wert runter, läuft bei Überschreitung mit "+" ins Minus.
+function fmtCountdown(remainingSeconds) {
+  const overtime = remainingSeconds < 0;
+  const s = Math.abs(Math.round(remainingSeconds));
+  const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return (overtime ? "+" : "") + `${hh}:${mm}:${ss}`;
+}
 
 // ---------- Avatare ----------
 
@@ -593,11 +603,22 @@ function layerActionsHtml(l, { includeDelete = false } = {}) {
   return actions;
 }
 
-// Live-Timer-Chip (⏱ 00:00:00), der sich per startWorkTimerTicker() selbst hochzählt,
-// solange die Aufgabe/Layer den Status LAEUFT hat.
+// Live-Timer-Chip für eine Aufgabe. Hat die Aufgabe eine erwartete Zeit
+// (erwartete_sekunden > 0), wird ein Countdown gezeigt (zählt runter,
+// pausiert exakt beim aktuellen Stand, geht bei Überschreitung ins Minus).
+// Ohne erwartete Zeit bleibt es bei der einfachen Stoppuhr wie bisher.
 function taskTimerHtml(t) {
-  if (t.status !== "LAEUFT" || !t.start_zeit) return "";
-  return `<span class="work-timer" data-timer-start="${t.start_zeit}">⏱ 00:00:00</span>`;
+  const erwartet = t.erwartete_sekunden || 0;
+  if (t.status === "LAEUFT" && t.start_zeit) {
+    if (erwartet > 0) {
+      return `<span class="work-timer" data-timer-start="${t.start_zeit}" data-timer-verbraucht="${t.verbrauchte_sekunden || 0}" data-timer-erwartet="${erwartet}">⏱ ${fmtCountdown(erwartet - (t.verbrauchte_sekunden || 0))}</span>`;
+    }
+    return `<span class="work-timer" data-timer-start="${t.start_zeit}">⏱ 00:00:00</span>`;
+  }
+  if (t.status === "PAUSIERT" && erwartet > 0) {
+    return `<span class="work-timer paused">⏸ ${fmtCountdown(erwartet - (t.verbrauchte_sekunden || 0))}</span>`;
+  }
+  return "";
 }
 function layerTimerHtml(l) {
   if (l.status !== "LAEUFT" || !l.start_zeit) return "";
@@ -641,7 +662,7 @@ async function renderAufgaben() {
 
   $app.innerHTML = `
     <h1>Aufgaben · Baustelle</h1>
-    <div class="subtitle">Eintragen → Starten → Häkchen setzen, wenn fertig. Pause ist jederzeit möglich.</div>
+    <div class="subtitle">Eintragen → Starten → Häkchen setzen, wenn fertig. Pause ist jederzeit möglich. Offene Aufgaben können sich auch andere freiwillig schnappen.</div>
 
     <div class="panel">
       <form id="taskForm" class="task-form">
@@ -651,6 +672,7 @@ async function renderAufgaben() {
           <option value="NORMAL" selected>Normal</option>
           <option value="HOCH">Hoch</option>
         </select>
+        <input type="number" name="erwartete_minuten" min="0" placeholder="Erwartete Zeit (Min.)" class="num-input" style="width:150px;height:40px;" title="Optional: Countdown ab Start. Läuft ins Minus, wenn überschritten." />
         ${canAssign ? `
         <div class="assignment-box" style="flex:1;min-width:260px;">
           <div class="assignment-mode">
@@ -687,6 +709,7 @@ async function renderAufgaben() {
         body: JSON.stringify({
           titel: f.get("titel"),
           prioritaet: f.get("prioritaet"),
+          erwartete_minuten: f.get("erwartete_minuten") ? Number(f.get("erwartete_minuten")) : 0,
           zustaendig_user_ids: (() => {
             const multi = getSelectedAssignmentIds(e.target);
             const single = f.get("zustaendig_user_id");
@@ -703,6 +726,11 @@ async function renderAufgaben() {
     setAssignmentMode(document.getElementById("taskForm"), b.dataset.assignmentMode === "multiple");
   });
   setupAssignmentPicker(document.getElementById("taskForm"));
+
+  document.querySelectorAll("[data-accept]").forEach((b) => b.onclick = async () => {
+    try { await api(`/tasks/${b.dataset.accept}/annehmen`, { method: "POST" }); renderAufgaben(); }
+    catch (e) { alert(e.message); }
+  });
 
   document.querySelectorAll("[data-start]").forEach((b) => b.onclick = async () => {
     try { await api(`/tasks/${b.dataset.start}/start`, { method: "POST" }); renderAufgaben(); }
@@ -735,10 +763,15 @@ function fullTaskHtml(t) {
   const assignees = t.assignees || [];
   const names = assignees.length ? assignees.map((a) => `${a.vorname} ${a.nachname} (${a.anteil || 100}%)`).join(" / ") : (t.zustaendig_name || "");
   const splitHint = assignees.length > 1 && t.punkte ? `<div class="task-meta">🪙 Punkte werden gleichmäßig auf ${assignees.length} Spieler verteilt.</div>` : "";
+  // Offene Aufgaben können von jedem, der noch nicht zugewiesen ist, freiwillig angenommen werden —
+  // egal ob unzugewiesen oder bereits jemand anderem zugewiesen.
+  const kannAnnehmen = t.status === "OFFEN" && !assignees.some((a) => a.id === state.me.id);
+  const acceptBtn = kannAnnehmen ? `<button class="btn small" data-accept="${t.id}">🙋 Annehmen</button>` : "";
   return `<li class="task-item ${cls}">
     <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
     ${taskTimerHtml(t)}
+    ${acceptBtn}
     ${actions}
   </li>`;
 }
@@ -1544,11 +1577,24 @@ function formatWorkTimer(item) {
   return fmtClock(Math.max(0, end - start));
 }
 
+// Aktualisiert alle laufenden Timer-Chips. Chips mit einem "erwartet"-Wert
+// (Aufgaben mit erwarteter Zeit) zählen als Countdown runter — der bereits
+// vor dem aktuellen Start verbrauchte Anteil wird per data-timer-verbraucht
+// mit eingerechnet, damit Pause/Weiter nahtlos ineinander übergehen.
 function refreshWorkTimers() {
   document.querySelectorAll("[data-timer-start]").forEach((el) => {
     const start = new Date(el.dataset.timerStart).getTime();
     const end = el.dataset.timerEnd ? new Date(el.dataset.timerEnd).getTime() : Date.now();
-    el.textContent = `⏱ ${fmtClock(Math.max(0, end - start))}`;
+    if (el.dataset.timerErwartet) {
+      const erwartet = Number(el.dataset.timerErwartet);
+      const verbraucht = Number(el.dataset.timerVerbraucht || 0);
+      const laufend = Math.max(0, (end - start) / 1000);
+      const remaining = erwartet - verbraucht - laufend;
+      el.textContent = `⏱ ${fmtCountdown(remaining)}`;
+      el.classList.toggle("overtime", remaining < 0);
+    } else {
+      el.textContent = `⏱ ${fmtClock(Math.max(0, end - start))}`;
+    }
   });
 }
 
@@ -1569,6 +1615,8 @@ extraUiStyle.textContent = `
 .dashboard-task-link { cursor:pointer; transition:transform .15s ease, border-color .15s ease; }
 .dashboard-task-link:hover { transform:translateY(-1px); border-color:var(--yellow); }
 .work-timer { margin-left:auto; padding:6px 10px; border-radius:10px; background:rgba(242,199,68,.12); color:var(--yellow); font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.work-timer.overtime { background: rgba(220,80,80,.18); color:#ff6b6b; }
+.work-timer.paused { background: rgba(255,255,255,.08); color: var(--text-dim,#aaa); }
 .admin-points-control { display:flex; gap:6px; margin-top:6px; }
 .admin-points-control .num-input { width:90px; height:32px; }
 `;
