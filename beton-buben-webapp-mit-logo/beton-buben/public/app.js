@@ -8,6 +8,8 @@ let state = {
   notifOpen: false,
   lastNotifId: 0,
   notifPermAsked: false,
+  blockLayers: null,      // Cache der Litematica-Blocklisten (aus /block-layers)
+  blockFocusNr: null,     // Welcher Block-Layer beim Öffnen des Blöcke-Tabs fokussiert werden soll
 };
 
 const $app = document.getElementById("app");
@@ -119,6 +121,13 @@ function ensureAssignmentStyles() {
     .zeit-teil{width:36px;height:28px;background:#0f1013;border:1px solid #3a3d44;border-radius:6px;color:var(--text,#fff);text-align:center;font-variant-numeric:tabular-nums;font-weight:700;padding:0;-moz-appearance:textfield;appearance:textfield}
     .zeit-teil::-webkit-outer-spin-button,.zeit-teil::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
     .zeit-sep{color:var(--text-dim,#aaa);font-weight:700}
+    .link-eingabe{flex:1;min-width:220px;height:40px}
+    .task-link-btn{white-space:nowrap}
+    .block-layer-nav{display:flex;flex-wrap:wrap;gap:6px;max-height:140px;overflow:auto}
+    .block-layer-chip{border:1px solid var(--border,#333);background:var(--panel,#17191d);color:var(--text,#fff);padding:6px 11px;border-radius:8px;cursor:pointer;font-weight:700;font-size:.9em}
+    .block-layer-chip.active{border-color:var(--yellow,#f2c744);color:var(--yellow,#f2c744);box-shadow:0 0 0 1px var(--yellow,#f2c744) inset}
+    .block-layer-card.focused{border:1px solid var(--yellow,#f2c744);box-shadow:0 0 0 1px var(--yellow,#f2c744) inset}
+    .block-layer-select{max-width:100%}
     @media(max-width:650px){.stadium-progress-wrap{grid-template-columns:1fr}.stadium-progress-percent{text-align:left}.assignment-picker{max-width:none}}
   `;
   document.head.appendChild(s);
@@ -190,6 +199,19 @@ function zeitEingabeHtml() {
     </div>`;
 }
 
+// Eingabefeld für einen optionalen Link an einer Aufgabe (z. B. Bauplan,
+// Referenzbild, Video-Tutorial). Wird beim Anlegen der Aufgabe mitgeschickt.
+function linkEingabeHtml() {
+  return `<input type="url" name="link" placeholder="🔗 Link (optional, z. B. Bauplan/Video)" class="link-eingabe" />`;
+}
+
+// Baut den "🔗 Link"-Button für eine Aufgabe, falls ein Link hinterlegt ist.
+// Öffnet den Link in einem neuen Tab.
+function taskLinkButtonHtml(t) {
+  if (!t.link) return "";
+  return `<a class="btn small secondary task-link-btn" href="${escapeHtml(t.link)}" target="_blank" rel="noopener noreferrer">🔗 Link</a>`;
+}
+
 // ---------- Neu-Zuweisen (Aufgaben & Layer) ----------
 // Admin/Berechtigte können eine Aufgabe/Layer JEDERZEIT neu zuweisen — auch wenn
 // bereits jemand zugewiesen ist oder sie freiwillig angenommen wurde. Erscheint
@@ -243,13 +265,72 @@ function wireReassignControls(callback) {
   });
 }
 
+// ---------- Blöcke: verknüpfte Litematica-Blockliste je Stadion-Layer ----------
+// Holt (gecacht) die Liste aller Litematica-Block-Layer vom Server. Wird beim
+// Anlegen einer Stadion-Layer als Auswahl angeboten und beim Anzeigen einer
+// Layer genutzt, um den "🧱 Blöcke"-Button + die Schnellverknüpfung zu bauen.
+async function loadBlockLayers() {
+  if (state.blockLayers) return state.blockLayers;
+  const { layers } = await api("/block-layers");
+  state.blockLayers = layers;
+  return layers;
+}
+
+// Auswahlfeld für die Block-Layer-Verknüpfung im "Neue Layer anlegen"-Formular.
+function blockLayerSelectHtml(blockLayers, selectedNr) {
+  return `
+    <select name="blocklayer_nr" class="select-dark block-layer-select" title="Verknüpft diese Stadion-Layer mit einer Materialliste aus dem Bauplan">
+      <option value="0">🧱 Blockliste verknüpfen (optional) …</option>
+      ${blockLayers.map((bl) => `<option value="${bl.nr}" ${bl.nr === selectedNr ? "selected" : ""}>Litematica-Layer ${bl.nr} (${bl.total} Blöcke)</option>`).join("")}
+    </select>`;
+}
+
+// Kleine Inline-Auswahl an einer bestehenden Stadion-Layer, mit der Admin/
+// Berechtigte die verknüpfte Blockliste jederzeit ändern oder entfernen können.
+function blockLinkQuickEditHtml(layerId, currentNr, blockLayers) {
+  if (!blockLayers || !blockLayers.length) return "";
+  return `
+    <select class="select-dark select-inline" data-blocklink="${layerId}" title="Verknüpfte Blockliste ändern">
+      <option value="0" ${!currentNr ? "selected" : ""}>🔗 Blockliste: keine</option>
+      ${blockLayers.map((bl) => `<option value="${bl.nr}" ${bl.nr === currentNr ? "selected" : ""}>🔗 Layer ${bl.nr} (${bl.total})</option>`).join("")}
+    </select>`;
+}
+
+// "🧱 Blöcke"-Button an einer Stadion-Layer — springt in den Blöcke-Tab und
+// scrollt direkt zur verknüpften Litematica-Layer.
+function blocksJumpButtonHtml(l) {
+  if (!l.blocklayer_nr) return "";
+  return `<button type="button" class="btn small secondary" data-goblocks="${l.blocklayer_nr}">🧱 Blöcke</button>`;
+}
+
+// Bindet die "🧱 Blöcke"-Buttons und die Blockliste-Schnellauswahl in einem
+// gerade gerenderten Container ein.
+function wireBlocksControls(callback) {
+  document.querySelectorAll("[data-goblocks]").forEach((b) => b.onclick = () => {
+    state.view = "bloecke";
+    state.blockFocusNr = Number(b.dataset.goblocks);
+    render();
+  });
+  document.querySelectorAll("[data-blocklink]").forEach((sel) => sel.onchange = async () => {
+    try {
+      await api(`/stadion/layers/${sel.dataset.blocklink}/blockliste`, {
+        method: "POST",
+        body: JSON.stringify({ blocklayer_nr: Number(sel.value) || 0 }),
+      });
+      if (callback) callback();
+    } catch (e) { alert(e.message); }
+  });
+}
+
 // ---------- Boot ----------
 
 async function boot() {
   ensureAssignmentStyles();
+  ensureBloeckeTab();
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.view = btn.dataset.view;
+      if (state.view !== "bloecke") state.blockFocusNr = null;
       render();
     });
   });
@@ -278,6 +359,18 @@ async function boot() {
     setToken(null);
     renderAuth("login");
   }
+}
+
+// Fügt den "🧱 Blöcke"-Tab-Button dynamisch neben den bestehenden Tabs ein,
+// falls er noch nicht im HTML vorhanden ist. Dadurch muss die index.html
+// nicht angepasst werden — der Button entsteht automatisch beim Laden.
+function ensureBloeckeTab() {
+  if (!$tabs || document.querySelector('[data-view="bloecke"]')) return;
+  const btn = document.createElement("button");
+  btn.className = "tab";
+  btn.dataset.view = "bloecke";
+  btn.textContent = "🧱 Blöcke";
+  $tabs.appendChild(btn);
 }
 
 function applyTabVisibility() {
@@ -495,6 +588,7 @@ function render() {
     dashboard: renderDashboard,
     aufgaben: renderAufgaben,
     stadion: renderStadion,
+    bloecke: renderBloecke,
     shop: renderShop,
     gruppen: renderGruppen,
     kalender: renderKalender,
@@ -657,6 +751,9 @@ async function renderDashboard() {
     catch (e) { alert(e.message); }
   });
 
+  // "🧱 Blöcke"-Buttons auf dem Dashboard verlinken in den Blöcke-Tab
+  wireBlocksControls();
+
   if (me.online) {
     const since = new Date(me.online_seit).getTime();
     state.tickHandle = setInterval(() => {
@@ -745,6 +842,7 @@ function dashboardTaskHtml(t) {
     <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
     ${taskTimerHtml(t)}
+    ${taskLinkButtonHtml(t)}
     ${taskActionsHtml(t)}
   </li>`;
 }
@@ -757,6 +855,7 @@ function dashboardLayerHtml(l) {
     <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}</span>
     <span class="status-pill ${l.status}">${STATUS_LABEL[l.status] || l.status}</span>
     ${layerTimerHtml(l)}
+    ${blocksJumpButtonHtml(l)}
     ${layerActionsHtml(l)}
   </li>`;
 }
@@ -784,6 +883,7 @@ async function renderAufgaben() {
           <option value="HOCH">Hoch</option>
         </select>
         ${zeitEingabeHtml()}
+        ${linkEingabeHtml()}
         ${canAssign ? `
         <div class="assignment-box" style="flex:1;min-width:260px;">
           <div class="assignment-mode">
@@ -821,6 +921,7 @@ async function renderAufgaben() {
           titel: f.get("titel"),
           prioritaet: f.get("prioritaet"),
           erwartete_minuten: getErwarteteMinuten(e.target),
+          link: f.get("link") || "",
           zustaendig_user_ids: (() => {
             const multi = getSelectedAssignmentIds(e.target);
             const single = f.get("zustaendig_user_id");
@@ -888,6 +989,7 @@ function fullTaskHtml(t, spielerUsers = [], canAssign = false) {
     <span class="titel">${escapeHtml(t.titel)}${t.punkte ? `<span class="punkte-tag">🪙 ${t.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
     <span class="status-pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
     ${taskTimerHtml(t)}
+    ${taskLinkButtonHtml(t)}
     ${acceptBtn}
     ${actions}
     ${reassignBtn}
@@ -912,9 +1014,10 @@ function stadiumVisualHtml(layers) {
 async function renderStadion() {
   $app.innerHTML = `<div class="empty">Lade Baustelle …</div>`;
   const canAssign = state.me.is_admin || state.me.kann_aufgaben_zuweisen;
-  const [{ layers }, spieler] = await Promise.all([
+  const [{ layers }, spieler, blockLayers] = await Promise.all([
     api("/stadion/layers"),
     canAssign ? api("/users/active") : Promise.resolve({ users: [] }),
+    loadBlockLayers(),
   ]);
   const fertig = layers.filter((l) => l.status === "FERTIG").length;
   const layerProzent = layers.length ? Math.round((fertig / layers.length) * 100) : 0;
@@ -939,6 +1042,7 @@ async function renderStadion() {
       <form id="layerForm" class="task-form">
         <input type="text" name="name" placeholder="z. B. Fundament, Rang 1, Dachkonstruktion …" required />
         ${zeitEingabeHtml()}
+        ${blockLayerSelectHtml(blockLayers, 0)}
         <div class="assignment-box" style="flex:1;min-width:260px;">
           <div class="assignment-mode">
             <button type="button" class="active" data-assignment-mode="single">👤 Eine Person</button>
@@ -962,7 +1066,7 @@ async function renderStadion() {
 
     <div class="panel">
       <h2>Alle Layer im Detail</h2>
-      ${layers.length ? `<ul class="task-list">${layers.slice().reverse().map((l) => layerItemHtml(l, canAssign, spieler.users)).join("")}</ul>` : `<div class="empty">Noch keine Layer angelegt. ${canAssign ? "Leg oben die erste an!" : "Frag einen Vorarbeiter."}</div>`}
+      ${layers.length ? `<ul class="task-list">${layers.slice().reverse().map((l) => layerItemHtml(l, canAssign, spieler.users, blockLayers)).join("")}</ul>` : `<div class="empty">Noch keine Layer angelegt. ${canAssign ? "Leg oben die erste an!" : "Frag einen Vorarbeiter."}</div>`}
     </div>
   `;
 
@@ -976,6 +1080,7 @@ async function renderStadion() {
           body: JSON.stringify({
             name: f.get("name"),
             erwartete_minuten: getErwarteteMinuten(e.target),
+            blocklayer_nr: Number(f.get("blocklayer_nr")) || 0,
             zustaendig_user_ids: (() => {
               const multi = getSelectedAssignmentIds(e.target);
               const single = f.get("zustaendig_user_id");
@@ -1008,9 +1113,11 @@ async function renderStadion() {
   // Neu-Zuweisen-Steuerelemente (Picker öffnen/schließen + Speichern)
   wireReassignControls(renderStadion);
   setupAssignmentPicker(document);
+  // "🧱 Blöcke"-Buttons + Blockliste-Schnellauswahl je Layer
+  wireBlocksControls(renderStadion);
 }
 
-function layerItemHtml(l, canAssign, spielerUsers = []) {
+function layerItemHtml(l, canAssign, spielerUsers = [], blockLayers = []) {
   const cls = l.status === "FERTIG" ? "done" : "";
   const actions = layerActionsHtml(l, { includeDelete: canAssign });
   const assignees = l.assignees || [];
@@ -1020,13 +1127,65 @@ function layerItemHtml(l, canAssign, spielerUsers = []) {
   const splitHint = assignees.length > 1 && l.punkte ? `<div class="task-meta">🪙 Punkte werden gleichmäßig auf ${assignees.length} Spieler verteilt.</div>` : "";
   // Admin/Berechtigte können jederzeit neu zuweisen — auch nach Zuweisung oder freiwilliger Annahme.
   const reassignBtn = canAssign ? reassignControlHtml("layer", l.id, spielerUsers, assignees.map((a) => a.id)) : "";
+  // Verknüpfte Blockliste: Sprung-Button für alle, Schnellauswahl zum Ändern nur für Berechtigte.
+  const blocksBtn = blocksJumpButtonHtml(l);
+  const blockQuickEdit = canAssign ? blockLinkQuickEditHtml(l.id, l.blocklayer_nr, blockLayers) : "";
   return `<li class="task-item ${cls}">
     <span class="titel">L${l.layer_nr} · ${escapeHtml(l.name)}${l.punkte ? `<span class="punkte-tag">🪙 ${l.punkte}</span>` : ""}${names ? `<div class="task-meta">👷 ${escapeHtml(names)}</div>` : ""}${splitHint}</span>
     <span class="status-pill ${l.status}">${STATUS_LABEL[l.status] || l.status}</span>
     ${layerTimerHtml(l)}
+    ${blocksBtn}
     ${actions}
     ${reassignBtn}
+    ${blockQuickEdit}
   </li>`;
+}
+
+// ---------- Blöcke (Litematica-Materiallisten je Bau-Layer) ----------
+
+async function renderBloecke() {
+  $app.innerHTML = `<div class="empty">Lade Blocklisten …</div>`;
+  const layers = await loadBlockLayers();
+  const focus = state.blockFocusNr || null;
+
+  $app.innerHTML = `
+    <h1>🧱 Blöcke · Litematica-Bauplan</h1>
+    <div class="subtitle">Materialliste je Bau-Layer aus dem Litematica-Bauplan — ${layers.length} Layer mit Blöcken insgesamt. Im Stadion-Bau-Tab kann jede Stadion-Layer mit einem dieser Layer verknüpft werden.</div>
+
+    ${layers.length ? `
+    <div class="panel">
+      <h2>Schnellsprung</h2>
+      <div class="block-layer-nav">
+        ${layers.map((l) => `<button type="button" class="block-layer-chip ${focus === l.nr ? "active" : ""}" data-blockjump="${l.nr}">L${l.nr}</button>`).join("")}
+      </div>
+    </div>
+    ${layers.map((l) => blockLayerCardHtml(l, focus === l.nr)).join("")}
+    ` : `<div class="empty">Es wurden noch keine Blocklisten aus einem Bauplan geladen.</div>`}
+  `;
+
+  document.querySelectorAll("[data-blockjump]").forEach((b) => b.onclick = () => {
+    state.blockFocusNr = Number(b.dataset.blockjump);
+    renderBloecke();
+  });
+
+  if (focus) {
+    setTimeout(() => {
+      const el = document.getElementById("blocklayer-" + focus);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  }
+}
+
+function blockLayerCardHtml(l, isFocus) {
+  return `<div class="panel block-layer-card ${isFocus ? "focused" : ""}" id="blocklayer-${l.nr}">
+    <h2>Layer ${l.nr} <span class="punkte-tag">${l.total} Blöcke</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Block</th><th>Anzahl</th></tr></thead>
+        <tbody>${l.blocks.map((b) => `<tr><td>${escapeHtml(b.label)}</td><td>${b.count}</td></tr>`).join("")}</tbody>
+      </table>
+    </div>
+  </div>`;
 }
 
 // ---------- Punkte-Shop ----------
