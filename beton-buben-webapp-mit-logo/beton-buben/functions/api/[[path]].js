@@ -32,6 +32,14 @@
 //   Der Zeitstrahl-Tab zeigt Kalender-Einträge/Events jetzt ebenfalls als
 //   Balken an — in eigenen Farben (Kalender-Eintrag: amber, Event: lila),
 //   damit sie sich optisch von Aufgaben/Layern abheben.
+//
+// NEU (3-Tage-Plan editierbar):
+//   Der Text im "📋 3-Tage-Plan"-Tab liegt jetzt in einer eigenen kleinen
+//   Tabelle (plan_3tage, id=1) statt hart im Frontend zu stehen. Admins
+//   können ihn direkt auf der Webseite bearbeiten und speichern — siehe
+//   ensurePlanTable()/DEFAULT_PLAN_3TAGE sowie die Endpunkte GET/POST
+//   /plan3tage weiter unten. Auch diese Tabelle wird beim ersten Zugriff
+//   automatisch angelegt, keine manuelle D1-Migration nötig.
 
 import { BLOCK_LAYERS } from "./block-layers-data.js";
 
@@ -416,6 +424,85 @@ function parseCoordValue(raw) {
   return Number.isFinite(n) ? n : null;
 }
 
+// ---------- 3-Tage-Plan (editierbarer Text) ----------
+// Eine einzige feste Zeile (id=1) mit dem kompletten Plan-Text. Wird beim
+// ersten Zugriff automatisch angelegt (keine manuelle D1-Migration nötig).
+// Formatierungs-Legende (siehe auch app.js/renderPlanTextHtml):
+//   # Titel         → große Überschrift
+//   ## Tag-Titel    → Tages-Überschrift
+//   @ Zeitmarke     → zentrierte Zeitangabe
+//   > Hinweis/Pause → hervorgehobener Hinweis
+//   ! Wichtig       → auffällige Warnung/Erinnerung
+//   Leerzeile       → zusätzlicher Abstand
+async function ensurePlanTable(env) {
+  await env.DB.exec(
+    "CREATE TABLE IF NOT EXISTS plan_3tage (id INTEGER PRIMARY KEY CHECK (id = 1), text TEXT, aktualisiert_am TEXT, aktualisiert_von TEXT)"
+  );
+}
+
+const DEFAULT_PLAN_3TAGE = `# 18:00 Start
+
+## Tag 1
+
+@ Start
+Bauplatz finden (mit Villager-Plains) — max. 30 Min.
+Breeder (ChargedJakob), Dia-Stuff für beide (Zidinator) — max. 45 Min.
+Trading Hall ausgraben (beide) — max. 20 Min.
+Farmen für Lecterns & Smithing Tables (Zidinator), Trading-Hall-Essentials machen und Tiere sammeln (ChargedJakob) — max. 20 Min.
+
+> Klo-Pause — max. 5 Min.
+
+@ Ungefähr 20:00
+Cobble-Gen-Farmen bauen (ChargedJakob), Zombies ansammeln + Nametag ×4 (Zidinator) + Blöcke + Villager sammeln (32 Stück) — 3 Std.
+
+> Wenn alles fertig und gut in der Zeit liegt: Tratsch-Pause, max. 15–30 Min. mit anderen
+
+@ Ungefähr 23:30
+Zidinator baut die Eisenfarm, währenddessen holt ChargedJakob Blöcke für den Supersmelter + hilft bei Zombie- und Villager-Farm — Supersmelter eventuell mitbauen — 3 Std.
+
+@ Ungefähr 02:30
+ChargedJakob geht schlafen = Eisenfarm läuft AFK weiter
+Zidinator macht Trades (ALLE — volles Programm) — 2,5 Std.
+
+@ Ungefähr 05:00 = Tag 1 Ende!!!
+
+## Tag 2
+
+! Wecker auf 09:00!!!
+
+Tridents-Farm läuft über den ganzen Tag
+Gabriel-Discord-Meetup = gutes Morgenbier
+
+@ 9:30 — Zusammenkunft
+Netherit minen + volle Verzauberungen (beide) — max. 1,5 Std.
+Bone-Meal-Farm bauen inkl. Blöcke (ChargedJakob) / Redstone-Farm farmen & bauen — max. 2,5 Std.
+
+> 13:30 Mittagessen — max. 45 Min.
+
+@ Ungefähr 14:15
+Concrete Maker inkl. Blöcke & Bau (Zidinator) + Honey Farm inkl. Blöcke & Bau (Zidinator) / Frog-Light-Farm inkl. Blöcke & Bau (ChargedJakob) — 2,5 Std.
+
+> Pause 2–3 Std. — mal an die frische Luft
+
+@ 19:00 Beginn
+Nebenaufgabe nebenbei: Wollfarm (egal wer)
+
+> RP-Pause, weil alle Farmen fertig sind (Armor Trim holen) — 1 Std.
+
+@ Ungefähr 20:30
+Terraformen + Koordination des Stadions (beide) — 3,5 Std.
+Zidinator: AFK-Eisenfarm + Chunkloader bei der Froglight-Farm
+
+@ Ungefähr 00:00 = Tag 2 Ende!!!
+
+## 3. / Restliche Tage
+
+! Wecker auf 9–11:00!!!
+
+Totems schnorren — Gabriel/Florian (egal wer)
+Maze bauen + Windburst II besorgen
+Farmen + Bauen den ganzen Tag — Hauptziel`;
+
 // ---------- Benachrichtigungen ----------
 
 async function notify(env, userId, typ, titel, text, link) {
@@ -632,6 +719,32 @@ export async function onRequest(context) {
         .bind(x, y, z)
         .run();
       return json({ ok: true, x, y, z });
+    }
+
+    // ---- 3-TAGE-PLAN (editierbarer Text) ----
+    // GET ist für alle angemeldeten Nutzer offen (nur Anzeige), POST nur für Admins.
+
+    if (path === "/plan3tage" && method === "GET") {
+      await ensurePlanTable(env);
+      const row = await env.DB.prepare("SELECT text, aktualisiert_am, aktualisiert_von FROM plan_3tage WHERE id = 1").first();
+      return json({
+        text: row && row.text ? row.text : DEFAULT_PLAN_3TAGE,
+        aktualisiert_am: row ? row.aktualisiert_am : null,
+        aktualisiert_von: row ? row.aktualisiert_von : null,
+      });
+    }
+
+    if (path === "/plan3tage" && method === "POST") {
+      if (!user.is_admin) return err("Nur für Admins.", 403);
+      await ensurePlanTable(env);
+      const text = (body.text || "").toString().slice(0, 20000);
+      await env.DB.prepare(
+        `INSERT INTO plan_3tage (id, text, aktualisiert_am, aktualisiert_von) VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET text = excluded.text, aktualisiert_am = excluded.aktualisiert_am, aktualisiert_von = excluded.aktualisiert_von`
+      )
+        .bind(text, nowIso(), meName)
+        .run();
+      return json({ ok: true });
     }
 
     // ---- ONLINE-ZEIT ----
